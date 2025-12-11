@@ -131,7 +131,6 @@ and USERPROFILE environment variable on windows."
 ;; ***
 
 (use-package org
-  :ensure t
   :config
   (setq org-src-fontify-natively t
         org-hide-emphasis-markers t
@@ -533,7 +532,7 @@ and USERPROFILE environment variable on windows."
 ;;   :ensure t
 ;;   :config
 ;;   (load-theme 'modus-operandi-tinted))
-(load-theme 'leuven-dark)
+(load-theme 'tango)
 
 
 ;; ***********************************************************************
