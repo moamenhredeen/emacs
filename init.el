@@ -150,7 +150,18 @@ and USERPROFILE environment variable on windows."
                                  ("WIP" . (:foreground "#ffea73" :weight bold))
                                  ("DONE" . (:foreground "#98971a" :weight bold))
                                  ("CANCELED" . (:foreground "#ebdbb2" :weight bold))
-                                 ("BLOCKED" . (:foreground "#ebdbb2" :weight bold)))))
+                                 ("BLOCKED" . (:foreground "#ebdbb2" :weight bold))))
+  ;; variable-sized headlines
+  (dolist (face '((org-level-1 . 1.4)
+                  (org-level-2 . 1.25)
+                  (org-level-3 . 1.15)
+                  (org-level-4 . 1.1)
+                  (org-level-5 . 1.05)
+                  (org-level-6 . 1.0)
+                  (org-level-7 . 1.0)
+                  (org-level-8 . 1.0)))
+    (set-face-attribute (car face) nil :weight 'bold :height (cdr face)))
+  (set-face-attribute 'org-document-title nil :height 1.6 :weight 'bold))
 
 (use-package ox-latex
   :custom
@@ -202,6 +213,21 @@ and USERPROFILE environment variable on windows."
     ;; TODO: do i need this ??
     (setq org-agenda-file-regexp "\\`\\\([^.].*\\.org\\\|[0-9]\\\{8\\\}\\\(\\.gpg\\\)?\\\)\\'")
     (add-to-list 'org-agenda-files org-journal-dir))
+
+
+(use-package org-modern
+  :ensure t
+  :custom
+  (org-modern-star 'replace)
+  (org-modern-table nil)
+  (org-modern-block-fringe nil)
+  :hook ((org-mode . org-modern-mode)
+         (org-agenda-finalize . org-modern-agenda)))
+
+(use-package olivetti
+  :ensure t
+  :hook (org-mode . olivetti-mode)
+  :custom (olivetti-body-width 75))
 
 
 ;; ***********************************************************************
@@ -572,14 +598,7 @@ and USERPROFILE environment variable on windows."
  '(git-gutter:added-sign " ")
  '(git-gutter:deleted-sign " ")
  '(git-gutter:modified-sign " ")
- '(package-selected-packages
-   '(consult-projectile dashboard dired-subtree embark-consult
-			evil-collection evil-multiedit
-			evil-nerd-commenter evil-org evil-surround
-			general git-gutter magit marginalia
-			markdown-mode modus-themes multiple-cursors
-			orderless org-journal org-roam powershell
-			restclient smartparens vertico)))
+ '(package-selected-packages nil))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
