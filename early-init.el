@@ -4,14 +4,19 @@
 ;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; Startup speed, annoyance suppression
-(setq gc-cons-threshold 10000000)
-
-;; Minimize garbage collection during startup
+;; Minimize garbage collection during startup, restore a sane value after
 (setq gc-cons-threshold most-positive-fixnum)
+(add-hook 'emacs-startup-hook
+          (lambda () (setq gc-cons-threshold (* 20 1000 1000))))
+
+;; Skip file-name handlers during startup (TRAMP, archives, etc.)
+(defvar my/file-name-handler-alist file-name-handler-alist)
+(setq file-name-handler-alist nil)
+(add-hook 'emacs-startup-hook
+          (lambda () (setq file-name-handler-alist my/file-name-handler-alist)))
 
 
-(setq large-file-warning-thresold 100000000)
+(setq large-file-warning-threshold 100000000)
 (setq byte-compile-warnings '(not obsolete))
 (setq warning-suppress-log-types '((comp) (bytecomp)))
 (setq native-comp-async-report-warnings-errors 'silent)

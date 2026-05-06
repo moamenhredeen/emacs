@@ -56,8 +56,10 @@ and USERPROFILE environment variable on windows."
 
 
 ;; variables
-(setq my/notes-directory
-	  (file-name-concat (expand-file-name (my/home-directory))  "notes"))
+(setq
+	my/notes-directory (file-name-concat (expand-file-name (my/home-directory))  "notes")
+	default-directory "C:/Users/mhraden/"
+	explicit-shell-file-name "pwsh.exe")
 
 (setq-default evil-shift-width custom-tab-width)
 (setq compilation-window-height 15
@@ -76,7 +78,7 @@ and USERPROFILE environment variable on windows."
 (prefer-coding-system 'utf-8)
 
 ;; alists
-(add-to-list 'default-frame-alist '(font . "JetBrainsMono Nerd Font"))
+(add-to-list 'default-frame-alist '(font . "Iosevka NF"))
 
 
 ;; hooks
@@ -113,10 +115,7 @@ and USERPROFILE environment variable on windows."
 ;; *** package repositories
 ;; ***
 
-;; elpa (default repo)
-(package-initialize)
-
-;; melpa
+;; melpa (elpa is the default and is initialized automatically before init.el)
 (use-package package
   :config
   (add-to-list
@@ -526,16 +525,64 @@ and USERPROFILE environment variable on windows."
 
 ;; ***********************************************************************
 ;; ***
+;; *** Dashboard
+;; ***
+
+(use-package dashboard
+  :ensure t
+  :config
+  (setq dashboard-banner-logo-title "Welcome to Emacs"
+        dashboard-startup-banner (expand-file-name "banner.txt" user-emacs-directory)
+        dashboard-center-content t
+        dashboard-vertically-center-content t
+        dashboard-show-shortcuts t
+        dashboard-set-heading-icons nil
+        dashboard-set-file-icons nil
+        dashboard-projects-backend 'projectile
+        dashboard-week-agenda nil
+        dashboard-items '((recents   . 5)
+                          (projects  . 5)
+                          (bookmarks . 5)))
+  (dashboard-setup-startup-hook))
+
+
+;; ***********************************************************************
+;; ***
 ;; *** Theme and UI Customizations
 ;; ***
-;; (use-package modus-themes
-;;   :ensure t
-;;   :config
-;;   (load-theme 'modus-operandi-tinted))
-(load-theme 'tango)
+(use-package modus-themes
+  :ensure t
+  :config
+  (load-theme 'modus-operandi-tinted t))
+;; (load-theme 'tango)
 
 
 ;; ***********************************************************************
 ;; ***
 ;; *** Auto Generated
 ;; ***
+(custom-set-variables
+ ;; custom-set-variables was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ '(custom-safe-themes
+   '("488b82a8d9ace0aea8a6825db144e3c65c4f1ef3e090b618bf311d9cdb513322"
+     default))
+ '(git-gutter:added-sign " ")
+ '(git-gutter:deleted-sign " ")
+ '(git-gutter:modified-sign " ")
+ '(package-selected-packages
+   '(consult-projectile dashboard dired-subtree embark-consult
+			evil-collection evil-multiedit
+			evil-nerd-commenter evil-org evil-surround
+			general git-gutter magit marginalia
+			markdown-mode modus-themes multiple-cursors
+			orderless org-journal org-roam powershell
+			restclient smartparens vertico)))
+(custom-set-faces
+ ;; custom-set-faces was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ )
