@@ -57,9 +57,11 @@ and USERPROFILE environment variable on windows."
 
 ;; variables
 (setq
-	my/notes-directory (file-name-concat (expand-file-name (my/home-directory))  "notes")
-	default-directory "C:/Users/mhraden/"
-	explicit-shell-file-name "pwsh.exe")
+	my/notes-directory (file-name-concat (expand-file-name (my/home-directory)) "notes")
+	default-directory (expand-file-name "~/")
+	explicit-shell-file-name (if (eq system-type 'windows-nt)
+				     "pwsh.exe"
+				   (or (getenv "SHELL") "/bin/bash")))
 
 (setq-default evil-shift-width custom-tab-width)
 (setq compilation-window-height 15
@@ -146,7 +148,7 @@ and USERPROFILE environment variable on windows."
         org-hide-leading-stars t
         org-hide-block-startup t
 		org-default-notes-file (file-name-concat my/notes-directory "inbox.org")
-		org-agenda-files '("/home/moamen/notes")
+		org-agenda-files (list my/notes-directory)
         org-ellipsis " ─╮"
         org-todo-keywords '("TODO" "WIP"
 							"|"
@@ -589,18 +591,11 @@ and USERPROFILE environment variable on windows."
  ;; If there is more than one, they won't work right.
  '(custom-safe-themes
    '("488b82a8d9ace0aea8a6825db144e3c65c4f1ef3e090b618bf311d9cdb513322"
-	 default))
+     default))
  '(git-gutter:added-sign " ")
  '(git-gutter:deleted-sign " ")
  '(git-gutter:modified-sign " ")
- '(package-selected-packages
-   '(consult-projectile corfu dired-subtree embark-consult
-						evil-collection evil-multiedit
-						evil-nerd-commenter evil-org evil-surround
-						general git-gutter magit marginalia
-						markdown-mode modus-themes olivetti orderless
-						org-journal org-modern org-roam restclient
-						vertico)))
+ '(package-selected-packages nil))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
