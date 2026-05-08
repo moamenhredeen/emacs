@@ -582,6 +582,15 @@ and USERPROFILE environment variable on windows."
 
 ;; ***********************************************************************
 ;; ***
+;; *** Email (mu4e)
+;; ***
+
+(when (eq system-type 'gnu/linux)
+  (load (expand-file-name "mu4e-config.el" user-emacs-directory)))
+
+
+;; ***********************************************************************
+;; ***
 ;; *** Auto Generated
 ;; ***
 (custom-set-variables
