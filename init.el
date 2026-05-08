@@ -68,11 +68,16 @@ and USERPROFILE environment variable on windows."
 	  tab-bar-show nil
       ;; do not show documentation in the minibuffer
       eldoc-echo-area-use-multiline-p nil
-      backup-directory-alist '(("." . "~/.emacsbackups")))
+      backup-directory-alist '(("." . "~/.emacsbackups"))
+      auto-save-file-name-transforms '((".*" "~/.emacsbackups/" t))
+      auto-save-list-file-prefix (expand-file-name "auto-save-list/.saves-" "~/.emacsbackups/")
+      create-lockfiles nil)
 
 
 ;; modes
 (pixel-scroll-precision-mode)
+(which-key-mode)
+(setq global-hl-line-mode nil)
 
 ;; functions
 (prefer-coding-system 'utf-8)
@@ -227,7 +232,7 @@ and USERPROFILE environment variable on windows."
 (use-package olivetti
   :ensure t
   :hook (org-mode . olivetti-mode)
-  :custom (olivetti-body-width 75))
+  :custom (olivetti-body-width 100))
 
 
 ;; ***********************************************************************
@@ -235,14 +240,9 @@ and USERPROFILE environment variable on windows."
 ;; *** Utility Packages
 ;; ***
 
-(use-package smartparens
-  :ensure t
-  :diminish smartparens-mode
-  :config
-  (progn
-    (require 'smartparens-config)
-    (smartparens-global-mode 1)
-    (show-paren-mode t)))
+;; built-in: auto-pair brackets/quotes and highlight matching parens
+(electric-pair-mode 1)
+(show-paren-mode 1)
 
 ;; TODO: is there better alternatives
 (use-package dired-subtree
@@ -299,6 +299,16 @@ and USERPROFILE environment variable on windows."
         completion-category-defaults nil
         completion-category-overrides '((file (styles partial-completion)))))
 
+(use-package corfu
+  :ensure t
+  :custom
+  (corfu-auto t)
+  (corfu-auto-delay 0.2)
+  (corfu-auto-prefix 2)
+  (corfu-cycle t)
+  :init
+  (global-corfu-mode))
+
 (use-package embark
   :ensure t
   :bind
@@ -323,13 +333,6 @@ and USERPROFILE environment variable on windows."
 
 (use-package restclient
   :ensure t)
-
-(use-package multiple-cursors
-  :ensure t
-  :config
-  (require 'multiple-cursors)
-  (setq mc/always-run-for-all t))
-
 
 ;; ***********************************************************************
 ;; ***
@@ -363,6 +366,21 @@ and USERPROFILE environment variable on windows."
   :ensure t
   :mode ("README\\.md\\'" . gfm-mode)
   :init (setq markdown-command "multimarkdown")
+  :hook ((markdown-mode . my/disable-line-numbers)
+         (markdown-mode . olivetti-mode)
+         (markdown-mode . visual-line-mode))
+  :custom
+  (markdown-fontify-code-blocks-natively t)
+  (markdown-header-scaling t)
+  (markdown-hide-urls t)
+  :config
+  (dolist (face '((markdown-header-face-1 . 1.4)
+                  (markdown-header-face-2 . 1.25)
+                  (markdown-header-face-3 . 1.15)
+                  (markdown-header-face-4 . 1.1)
+                  (markdown-header-face-5 . 1.05)
+                  (markdown-header-face-6 . 1.0)))
+    (set-face-attribute (car face) nil :weight 'bold :height (cdr face)))
   :bind (:map markdown-mode-map
          ("C-c C-e" . markdown-do)))
 
@@ -453,8 +471,8 @@ and USERPROFILE environment variable on windows."
 
    "M-q"    'evil-quit
    "M-o"    'tab-switch
-   "M-n"    'mc/mark-next-like-this
-   "M-N"    'mc/mark-all-like-this)
+   "M-n"    'evil-multiedit-match-and-next
+   "M-N"    'evil-multiedit-match-all)
 
 
   (general-define-key
@@ -551,29 +569,6 @@ and USERPROFILE environment variable on windows."
 
 ;; ***********************************************************************
 ;; ***
-;; *** Dashboard
-;; ***
-
-(use-package dashboard
-  :ensure t
-  :config
-  (setq dashboard-banner-logo-title "Welcome to Emacs"
-        dashboard-startup-banner (expand-file-name "banner.txt" user-emacs-directory)
-        dashboard-center-content t
-        dashboard-vertically-center-content t
-        dashboard-show-shortcuts t
-        dashboard-set-heading-icons nil
-        dashboard-set-file-icons nil
-        dashboard-projects-backend 'projectile
-        dashboard-week-agenda nil
-        dashboard-items '((recents   . 5)
-                          (projects  . 5)
-                          (bookmarks . 5)))
-  (dashboard-setup-startup-hook))
-
-
-;; ***********************************************************************
-;; ***
 ;; *** Theme and UI Customizations
 ;; ***
 (use-package modus-themes
@@ -594,11 +589,18 @@ and USERPROFILE environment variable on windows."
  ;; If there is more than one, they won't work right.
  '(custom-safe-themes
    '("488b82a8d9ace0aea8a6825db144e3c65c4f1ef3e090b618bf311d9cdb513322"
-     default))
+	 default))
  '(git-gutter:added-sign " ")
  '(git-gutter:deleted-sign " ")
  '(git-gutter:modified-sign " ")
- '(package-selected-packages nil))
+ '(package-selected-packages
+   '(consult-projectile corfu dired-subtree embark-consult
+						evil-collection evil-multiedit
+						evil-nerd-commenter evil-org evil-surround
+						general git-gutter magit marginalia
+						markdown-mode modus-themes olivetti orderless
+						org-journal org-modern org-roam restclient
+						vertico)))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
