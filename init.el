@@ -571,6 +571,52 @@ and USERPROFILE environment variable on windows."
 
 ;; ***********************************************************************
 ;; ***
+;; *** RSS (Elfeed)
+;; ***
+
+(use-package elfeed
+  :ensure t
+  :defer t
+  :config
+  (setq elfeed-use-curl t
+        elfeed-curl-max-connections 10
+        elfeed-search-filter "@6-months-ago +unread"
+        elfeed-feeds
+        '(;; Architecture & System Design
+          ("https://martinfowler.com/feed.atom"            arch)
+          ("https://blog.pragmaticengineer.com/rss/"       arch)
+          ("http://highscalability.com/rss.xml"            arch)
+
+          ;; Web
+          ("https://web.dev/feed.xml"                      web)
+          ("https://developer.mozilla.org/en-US/blog/rss.xml" web)
+          ("https://www.smashingmagazine.com/feed/"        web)
+
+          ;; Java & Spring
+          ("https://spring.io/blog.atom"                   java spring)
+          ("https://www.baeldung.com/feed/"                java)
+          ("https://inside.java/feed.xml"                  java)
+
+          ;; AI
+          ("https://ai.googleblog.com/feeds/posts/default" ai)
+          ("https://www.deeplearning.ai/the-batch/feed/"   ai)
+          ("https://research.facebook.com/feed/"           ai)
+
+          ;; Security
+          ("https://krebsonsecurity.com/feed/"             security)
+          ("https://www.schneier.com/feed/atom/"           security)
+          ("https://googleprojectzero.blogspot.com/feeds/posts/default" security)
+          ("https://feeds.feedburner.com/TheHackersNews"   security)
+          ("https://isc.sans.edu/rssfeed_full.xml"         security)
+
+          ;; Deep Dives
+          ("https://jvns.ca/atom.xml"                      deep)
+          ("https://danluu.com/atom.xml"                   deep)
+          ("https://matklad.github.io/feed.xml"            deep)
+          ("https://fasterthanli.me/index.xml"             deep))))
+
+;; ***********************************************************************
+;; ***
 ;; *** Theme and UI Customizations
 ;; ***
 (use-package modus-themes
