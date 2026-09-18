@@ -13,3 +13,6 @@ bookmarks
 org-persist/
 projects
 recentf
+tree-sitter/
+server/
+url/
