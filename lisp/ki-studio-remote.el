@@ -144,12 +144,12 @@ runs without effect; that is what the second half catches."
                   ki-studio--check-diags))
           (unless errors
             ;; an uncaught compiler error carries no line, only a dump
-            (push (list 1 :error
-                        (concat "check: "
-                                (truncate-string-to-width
-                                 (format "%s" (if (consp body) (alist-get 'error body) body))
-                                 300 nil nil "…")))
-                  ki-studio--check-diags))
+            (let ((text (format "%s" (if (consp body) (alist-get 'error body) body))))
+              (push (list 1 :error
+                          (concat "check: " (truncate-string-to-width text 300 nil nil "…")
+                                  (and (equal text "unsupported format")
+                                       " (the text has to start with `ki'; comments go under it)")))
+                    ki-studio--check-diags)))
           (add-hook 'after-change-functions #'ki-studio--forget-check-lines nil t)
           (message "%s" (nth 2 (car ki-studio--check-diags))))
       (let* ((variables (alist-get 'variables body))
@@ -288,26 +288,89 @@ direction the review copies move.  The buffer is not saved."
   (ki-hiro-vertices env (ki-hiro-type-query env "ogit/HR/JobDescription")
                     "ogit/_id,ogit/name,ogit/_created-on"))
 
+(defun ki-studio--xid-hash (vertex)
+  "The import hash in VERTEX's xid, \"dlr-hr-jd:HASH\" or \"dlr-hr-wu:HASH:N\"."
+  (when-let* ((xid (alist-get 'ogit/_xid vertex)))
+    (nth 1 (split-string (car (last (split-string xid "|"))) ":"))))
+
+(defun ki-studio--import-counts (env)
+  "Hash: job description import hash -> (WORKUNITS WITH-VALUES WITH-AV).
+One query for all WorkUnits of the scope, assigned to their job
+description by the hash in their xid.  That matched the ogit/contains
+edges for 140 of 142 job descriptions (2026-11-24): a WorkUnit can be
+connected to a job description whose hash it does not carry."
+  (let ((counts (make-hash-table :test #'equal)))
+    (dolist (wu (ki-hiro-vertices env (ki-hiro-type-query env "ogit/HR/WorkUnit")
+                                  "ogit/_id,ogit/_xid,ogit/values,/avKern,/avFakt"))
+      (when-let* ((hash (ki-studio--xid-hash wu)))
+        (let ((entry (gethash hash counts (list 0 0 0))))
+          (puthash hash
+                   (list (1+ (nth 0 entry))
+                         (+ (nth 1 entry) (if (alist-get 'ogit/values wu) 1 0))
+                         (+ (nth 2 entry) (if (or (alist-get '/avKern wu) (alist-get '/avFakt wu)) 1 0)))
+                   counts))))
+    counts))
+
+(defun ki-studio--import-flag (counts)
+  "Short import status for COUNTS, a list (WORKUNITS WITH-VALUES WITH-AV)."
+  (pcase-let ((`(,n ,values ,av) counts))
+    (cond ((zerop n) (propertize "✗ keine WorkUnits" 'face 'error))
+          ((and (= values n) (= av n)) (propertize (format "✓ %d WU" n) 'face 'success))
+          (t (propertize
+              (concat (format "⚠ %d WU" n)
+                      (and (< values n) (format ", %d ohne values" (- n values)))
+                      (and (< av n) (format ", %d ohne av*" (- n av))))
+              'face 'warning)))))
+
+(defun ki-studio--wu-counts (workunits)
+  "(WORKUNITS WITH-VALUES WITH-AV) of the WorkUnit vertices WORKUNITS."
+  (list (length workunits)
+        (seq-count (lambda (w) (alist-get 'ogit/values w)) workunits)
+        (seq-count #'ki-studio--av-attributes workunits)))
+
 (defun ki-studio-select-jd (id name)
-  "Focus the job description ID (named NAME) for av view and on-part tests.
+  "Focus the job description ID (named NAME) for its view and on-part tests.
 There are duplicates and versions without WorkUnits, so the choice shows
-the creation date and the end of the id."
+the creation date, the end of the id, and whether the import is complete:
+WorkUnits there, each with its activity text (values) and av* attributes."
   (interactive
    (let* ((env (ki-studio--env))
           (jds (ki-studio--reading "Listing job descriptions"
-                 (ki-studio--job-descriptions env)))
+                 (ki-hiro-vertices env (ki-hiro-type-query env "ogit/HR/JobDescription")
+                                   "ogit/_id,ogit/_xid,ogit/name,ogit/_created-on")))
+          (counts (ki-studio--reading "Counting WorkUnits" (ki-studio--import-counts env)))
           (table (mapcar (lambda (jd)
                            (cons (format "%s  [%s  …%s]" (alist-get 'ogit/name jd)
                                          (ki-studio--date (alist-get 'ogit/_created-on jd))
                                          (substring (alist-get 'ogit/_id jd) -8))
                                  jd))
                          jds))
-          (jd (cdr (assoc (completing-read "Job description: " table nil t) table))))
+          (focused (car (gethash (ki-studio--root) ki-studio--jd-by-root)))
+          (current (car (seq-find (lambda (entry)
+                                    (equal (alist-get 'ogit/_id (cdr entry)) focused))
+                                  table)))
+          (completion-extra-properties
+           (list :annotation-function
+                 (lambda (candidate)
+                   (let ((hash (ki-studio--xid-hash (cdr (assoc candidate table)))))
+                     (concat "  " (if hash
+                                      (ki-studio--import-flag (gethash hash counts (list 0 0 0)))
+                                    (propertize "? ohne xid" 'face 'shadow))
+                             (and (equal candidate current)
+                                  (propertize "  ◀ im Fokus" 'face 'bold)))))))
+          ;; the focused one is the default: listed first, kept with RET
+          (jd (cdr (assoc (completing-read
+                           (if current
+                               (format "Job description (im Fokus: %s): "
+                                       (alist-get 'ogit/name (cdr (assoc current table))))
+                             "Job description: ")
+                           table nil t nil nil current)
+                          table))))
      (list (alist-get 'ogit/_id jd) (alist-get 'ogit/name jd))))
   (puthash (ki-studio--root) (cons id name) ki-studio--jd-by-root)
-  (let ((wus (cdr (ki-studio--jd id))))
-    (message "Focus: %s, %d WorkUnits, %d with av*" name (length wus)
-             (seq-count #'ki-studio--av-attributes wus))))
+  ;; the edges, not the xids: this is the count the rules see
+  (message "Focus: %s, %s" name
+           (ki-studio--import-flag (ki-studio--wu-counts (cdr (ki-studio--jd id))))))
 
 (defun ki-studio--jd-or-ask ()
   "The (ID . NAME) in focus, asking for one the first time."
@@ -315,19 +378,31 @@ the creation date and the end of the id."
       (progn (call-interactively #'ki-studio-select-jd)
              (gethash (ki-studio--root) ki-studio--jd-by-root))))
 
+(defvar ki-studio--jd-related (make-hash-table :test #'equal)
+  "JD id -> alist (TYPE . VERTICES) of its other neighbours, read with it.")
+
 (defun ki-studio--jd (id &optional refresh)
   "(JD . WORKUNITS) of the job description ID, read once per session.
-REFRESH reads it again: an enrichment can change the WorkUnits mid-round."
+Its qualification requirements and authorities are read in the same
+pass, see `ki-studio--jd-related'.  REFRESH reads it again: an
+enrichment can change the WorkUnits mid-round."
   (or (and (not refresh) (gethash id ki-studio--jd-cache))
       (let* ((env (ki-studio--env))
-             (pair (ki-studio--reading "Reading the job description"
-                     (cons (ki-hiro-get env id)
-                           (mapcar (lambda (edge) (ki-hiro-get env (alist-get 'ogit/_in-id edge)))
-                                   (seq-filter (lambda (edge) (equal (alist-get 'ogit/_in-type edge)
-                                                                     "ogit/HR/WorkUnit"))
-                                               (ki-hiro-out-edges env id)))))))
-        (setcdr pair (sort (cdr pair) (lambda (a b) (string< (alist-get 'ogit/name a "")
-                                                             (alist-get 'ogit/name b "")))))
+             (by-name (lambda (a b) (string< (alist-get 'ogit/name a "")
+                                             (alist-get 'ogit/name b ""))))
+             (jd (ki-studio--reading "Reading the job description" (ki-hiro-get env id)))
+             (edges (ki-hiro-out-edges env id))
+             (neighbours
+              (lambda (type)
+                (ki-studio--reading (format "Reading %s" (file-name-nondirectory type))
+                  (mapcar (lambda (edge) (ki-hiro-get env (alist-get 'ogit/_in-id edge)))
+                          (seq-filter (lambda (edge) (equal (alist-get 'ogit/_in-type edge) type))
+                                      edges)))))
+             (pair (cons jd (sort (funcall neighbours "ogit/HR/WorkUnit") by-name))))
+        (puthash id `(("ogit/HR/QualificationRequirement"
+                       . ,(funcall neighbours "ogit/HR/QualificationRequirement"))
+                      ("ogit/HR/Authority" . ,(funcall neighbours "ogit/HR/Authority")))
+                 ki-studio--jd-related)
         (puthash id pair ki-studio--jd-cache))))
 
 (defun ki-studio--av-attributes (vertex)
@@ -343,44 +418,83 @@ REFRESH reads it again: an enrichment can change the WorkUnits mid-round."
     (define-key map "g" #'ki-studio-av-refresh)
     map))
 
-(define-derived-mode ki-studio-av-mode special-mode "KI-av"
-  "The WorkUnits of a job description with their av* attributes."
+(define-derived-mode ki-studio-av-mode special-mode "KI-Stelle"
+  "A job description: its text, qualifications, authorities and WorkUnits."
   (setq truncate-lines nil)
   (visual-line-mode 1))
 
-(defvar-local ki-studio--av-jd nil "JD id this av buffer shows.")
+(defvar-local ki-studio--av-jd nil "JD id this buffer shows.")
+
+(defun ki-studio--insert-field (label value)
+  "Insert LABEL and VALUE, the value wrapped under its own indentation."
+  (when (and value (not (equal value "")))
+    ;; continuation lines, wrapped or real, start under the value
+    (let ((prefix (make-string (+ 4 (max 13 (length label))) ?\s)))
+      (insert (propertize (format "   %-13s " label) 'face 'font-lock-variable-name-face)
+              (propertize (format "%s" value) 'wrap-prefix prefix 'line-prefix prefix)
+              "\n"))))
+
+(defun ki-studio--free-attributes (vertex)
+  "The free attributes of VERTEX (stored with a leading slash), sorted.
+The av* ones are left out; they have their own lines."
+  (sort (cl-loop for (key . value) in vertex
+                 for name = (symbol-name key)
+                 when (and (string-prefix-p "/" name) (not (string-prefix-p "/av" name)))
+                 collect (cons (substring name 1) value))
+        (lambda (a b) (string< (car a) (car b)))))
 
 (defun ki-studio-av (&optional refresh jd-id)
-  "Show the WorkUnits of the focused job description with all av* values.
-With REFRESH (prefix argument), read them again.  JD-ID overrides the
+  "Show the focused job description: everything a rule can read on it.
+Its text and free attributes, its qualification requirements and
+authorities, and each WorkUnit with its activity text and av* values.
+With REFRESH (prefix argument), read it again.  JD-ID overrides the
 focused one."
   (interactive "P")
   (let* ((jd-id (or jd-id (car (ki-studio--jd-or-ask))))
          (root (ki-studio--root))
          (pair (ki-studio--jd jd-id refresh))
          (jd (car pair))
-         (buffer (get-buffer-create (format "*ki av: %s*" (alist-get 'ogit/name jd)))))
+         (related (gethash jd-id ki-studio--jd-related))
+         (qualifications (cdr (assoc "ogit/HR/QualificationRequirement" related)))
+         (authorities (cdr (assoc "ogit/HR/Authority" related)))
+         (buffer (get-buffer-create (format "*ki stelle: %s*" (alist-get 'ogit/name jd)))))
     (with-current-buffer buffer
       (ki-studio-av-mode)
       (setq ki-studio--av-jd jd-id
             default-directory root)
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (propertize (format "%s  (%s)\n" (alist-get 'ogit/name jd) jd-id)
-                            'face 'bold)
-                (format "%d WorkUnits\n" (length (cdr pair))))
+        (insert (propertize (format "%s  (%s)\n" (alist-get 'ogit/name jd) jd-id) 'face 'bold)
+                (format "%d WorkUnits, %d Qualifikationen, %d Befugnisse, angelegt %s, v%s\n"
+                        (length (cdr pair)) (length qualifications) (length authorities)
+                        (ki-studio--date (alist-get 'ogit/_created-on jd))
+                        (alist-get 'ogit/_v jd)))
+        (ki-studio--section "Stelle")
+        (ki-studio--insert-field "description" (alist-get 'ogit/description jd))
+        (ki-studio--insert-field "content" (alist-get 'ogit/content jd))
+        (pcase-dolist (`(,name . ,value) (ki-studio--free-attributes jd))
+          (ki-studio--insert-field name value))
+        (ki-studio--section "Qualifikationen (ogit/requires)")
+        (dolist (q qualifications)
+          (ki-studio--insert-field (or (alist-get 'ogit/HR/qualificationKind q) "-")
+                                   (alist-get 'ogit/description q)))
+        (when authorities
+          (ki-studio--section "Befugnisse (ogit/defines)")
+          (dolist (a authorities)
+            (ki-studio--insert-field "Authority" (or (alist-get 'ogit/description a)
+                                                     (alist-get 'ogit/name a)))))
         (dolist (wu (cdr pair))
           (insert "\n"
                   (propertize (format "== %s" (alist-get 'ogit/name wu)) 'face 'font-lock-function-name-face)
                   (format "  [%s]  Anteil %s  v%s\n"
                           (alist-get 'ogit/_id wu) (alist-get 'ogit/HR/timeShare wu)
                           (alist-get 'ogit/_v wu)))
+          (ki-studio--insert-field "values" (alist-get 'ogit/values wu))
           (let ((av (ki-studio--av-attributes wu)))
             (if (not av)
                 (insert "   (keine av*-Attribute)\n")
               (pcase-dolist (`(,name . ,value) av)
-                (insert (propertize (format "   %-12s " name) 'face 'font-lock-variable-name-face)
-                        (format "%s\n" value))))))
+                (ki-studio--insert-field name value)))))
         (goto-char (point-min))))
     (display-buffer buffer)))
 
@@ -685,6 +799,58 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
   "Insert a section TITLE."
   (insert "\n" (propertize title 'face 'font-lock-keyword-face) "\n"))
 
+(defun ki-studio--insert-ki (name files root)
+  "Insert the KI NAME, as a button to its file when FILES has one.
+FILES maps names to files; ROOT is the checkout, for the help text."
+  (if-let* ((file (gethash name files)))
+      (insert-text-button name 'action (lambda (_) (find-file file))
+                          'help-echo (file-relative-name file root))
+    (insert (propertize name 'face 'shadow))))
+
+(defun ki-studio--waiting-on (todo)
+  "Files of the KIs under ki/ whose `when' waits on TODO."
+  (let ((ki-project-directory (ki-studio--ki-dir)))
+    (cl-loop for (file . occs) in (ki--project-occurrences)
+             when (cl-some (lambda (occ) (and (equal (ki-occ-name occ) todo)
+                                              (eq (ki-occ-section occ) 'when)
+                                              (eq (ki-occ-kind occ) 'read)))
+                           occs)
+             collect file)))
+
+(defun ki-studio--insert-halt (env fired lines open files root)
+  "Insert where a run that has not resolved stands.
+FIRED and LINES are the fired KIs and justification lines of the issue,
+OPEN its open ToDos; the KIs waiting on each are where to look for the
+rule that did not fire.  FILES and ROOT as in `ki-studio--insert-ki'."
+  (ki-studio--section "Halt")
+  (let* ((names (mapcar (lambda (f) (ki-studio--ki-name env (nth 2 f))) fired))
+         ;; the idle stop only says that nothing else fired any more
+         (idle (equal (car (last names)) "Auto Idle"))
+         (last-rule (car (last (if idle (butlast names) names)))))
+    (cond ((null fired))
+          ((null (caar fired))
+           (insert "  zuletzt gefeuert  (unbekannt: keine Reihenfolge gelesen)\n"))
+          (t (when idle
+               (insert "  gestoppt durch    Auto Idle: danach feuerte nichts mehr\n"))
+             (when last-rule
+               (insert "  zuletzt gefeuert  ")
+               (ki-studio--insert-ki last-rule files root)
+               (insert "\n")))))
+  (when lines
+    (insert "  letzte Zeile      "
+            (string-trim (car (split-string (car (last lines)) "|"))) "\n"))
+  ;; ProcessIssue is the global trigger every rule waits on, not a step
+  (dolist (todo (remove "ProcessIssue" open))
+    (let ((waiting (ki-studio--waiting-on todo)))
+      (insert (format "  %s offen, %d KIs warten darauf\n" todo (length waiting)))
+      (dolist (file (seq-take waiting 15))
+        (insert "    ")
+        (insert-text-button (file-name-base file) 'action (lambda (_) (find-file file))
+                            'help-echo (file-relative-name file root))
+        (insert "\n"))
+      (when (> (length waiting) 15)
+        (insert (format "    … %d weitere (M-? auf %s)\n" (- (length waiting) 15) todo))))))
+
 (defun ki-studio-issue (id)
   "Show the issue ID: status, result, open ToDos, lines and fired KIs."
   (interactive (list (string-trim (read-string "Issue id: " nil 'ki-studio--issue-history
@@ -709,9 +875,16 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
                                                       ("RESOLVED" 'success)
                                                       ((or "STOPPED" "WAITING") 'warning)
                                                       (_ 'default))))
-                (format "Stelle   %s  (%s)\n" (or (alist-get '/stelle issue) "?")
-                        (alist-get 'ogit/Automation/originNode issue))
-                (format "Lauf     %s -> %s, v%s\n"
+                "Stelle   ")
+        (let ((jd-id (alist-get 'ogit/Automation/originNode issue))
+              (jd-name (or (alist-get '/stelle issue) "?")))
+          (insert-text-button jd-name
+                              'action (lambda (_)
+                                        (ki-studio-select-jd jd-id jd-name)
+                                        (ki-studio-av))
+                              'help-echo "Focus this job description and show it")
+          (insert (format "  (%s)\n" jd-id)))
+        (insert (format "Lauf     %s -> %s, v%s\n"
                         (ki-studio--date (alist-get 'ogit/_created-on issue))
                         (ki-studio--date (alist-get 'ogit/_modified-on issue))
                         (alist-get 'ogit/_v issue))
@@ -719,10 +892,13 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
                         (or (alist-get '/zielEntgeltgruppe issue) "-")
                         (or (alist-get '/zielFallgruppe issue) "-")))
         (let ((open (seq-filter (lambda (todo) (alist-get (intern (concat "/" todo)) issue)) todos))
-              (question (alist-get '/KlaereRueckfrage issue)))
+              (question (alist-get '/KlaereRueckfrage issue))
+              (lines (ki-studio--json-list (alist-get '/begruendung issue))))
           (insert (format "Offen    %s\n" (if open (string-join open ", ") "-")))
           (when question
-            (insert (propertize (format "Rueckfrage %s\n" question) 'face 'warning))))
+            (insert (propertize (format "Rueckfrage %s\n" question) 'face 'warning)))
+          (unless (member status '("RESOLVED" "RESOLVED_EXTERNAL"))
+            (ki-studio--insert-halt env fired lines open files root)))
         (ki-studio--section "Begruendung")
         (dolist (line (ki-studio--json-list (alist-get '/begruendung issue)))
           (let ((parts (mapcar #'string-trim (split-string line "|"))))
@@ -743,15 +919,10 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
                  (if (and fired (null (caar fired))) ", OHNE Reihenfolge" "")))
         (let ((t0 (cadr (car fired))))
           (pcase-dolist (`(,count ,millis ,ki ,_node) fired)
-            (let* ((name (ki-studio--ki-name env ki))
-                   (file (gethash name files)))
-              (insert (format "  %4s %7s  " (or count "-")
-                              (if (and millis t0) (format "%dms" (- millis t0)) "")))
-              (if file
-                  (insert-text-button name 'action (lambda (_) (find-file file))
-                                      'help-echo (file-relative-name file root))
-                (insert (propertize name 'face 'shadow)))
-              (insert "\n"))))
+            (insert (format "  %4s %7s  " (or count "-")
+                            (if (and millis t0) (format "%dms" (- millis t0)) "")))
+            (ki-studio--insert-ki (ki-studio--ki-name env ki) files root)
+            (insert "\n")))
         (ki-studio--section "Variablen")
         (dolist (kv (sort (seq-filter (lambda (kv) (string-prefix-p "/" (symbol-name (car kv)))) issue)
                           (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b))))))
@@ -765,12 +936,32 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
   (interactive)
   (ki-studio-issue ki-studio--issue-id))
 
-(defun ki-studio-issues ()
+(defvar-keymap ki-studio-issues-mode-map
+  :doc "Keymap for `ki-studio-issues-mode'."
+  "RET" #'ki-studio-issues-open
+  "g" #'ki-studio-issues-refresh)
+
+(define-derived-mode ki-studio-issues-mode tabulated-list-mode "KI-issues"
+  "The issues on one job description.  RET reads one, g lists again.")
+
+(defvar-local ki-studio--issues-jd nil "(ID . NAME) this issue list shows.")
+
+(defun ki-studio-issues-open ()
+  "Read the issue on this line."
+  (interactive)
+  (ki-studio-issue (or (tabulated-list-get-id) (user-error "No issue on this line"))))
+
+(defun ki-studio-issues-refresh ()
+  "List the issues of this buffer's job description again."
+  (interactive)
+  (ki-studio-issues ki-studio--issues-jd))
+
+(defun ki-studio-issues (&optional jd)
   "List the issues on the focused job description, newest first.
-RET reads one."
+JD, an (ID . NAME), overrides the focused one.  RET reads one."
   (interactive)
   (let* ((env (ki-studio--env))
-         (jd (ki-studio--jd-or-ask))
+         (jd (or jd (ki-studio--jd-or-ask)))
          (root (ki-studio--root))
          (issues (ki-studio--reading "Listing issues"
                    (ki-hiro-vertices
@@ -780,8 +971,9 @@ RET reads one."
                     "ogit/_id,ogit/_created-on,ogit/_modified-on,ogit/status,ogit/subject")))
          (buffer (get-buffer-create (format "*ki issues: %s*" (cdr jd)))))
     (with-current-buffer buffer
-      (tabulated-list-mode)
+      (ki-studio-issues-mode)
       (setq default-directory root
+            ki-studio--issues-jd jd
             tabulated-list-format [("Angelegt" 17 t) ("Geaendert" 17 t) ("Status" 11 t)
                                    ("Subject" 14 t) ("Id" 0 nil)]
             tabulated-list-sort-key '("Angelegt" . t)
@@ -794,12 +986,27 @@ RET reads one."
                                          (format "%s" (alist-get 'ogit/subject i))
                                          id))))
                     issues))
-      (local-set-key (kbd "RET") (lambda () (interactive)
-                                   (ki-studio-issue (tabulated-list-get-id))))
       (tabulated-list-init-header)
       (tabulated-list-print))
     (pop-to-buffer buffer)
     (message "%d issues on %s" (length issues) (cdr jd))))
+
+;;; Evil
+
+;; evil's normal state shadows the keys of these modes (RET moves a
+;; line), so bind them there too, as evil-collection does: RET, gr, q
+(declare-function evil-define-key* "evil-core")
+(with-eval-after-load 'evil
+  (evil-define-key* 'normal ki-studio-issues-mode-map
+    (kbd "RET") #'ki-studio-issues-open
+    (kbd "gr") #'ki-studio-issues-refresh
+    (kbd "q") #'quit-window)
+  (evil-define-key* 'normal ki-studio-issue-mode-map
+    (kbd "gr") #'ki-studio-issue-refresh
+    (kbd "q") #'quit-window)
+  (evil-define-key* 'normal ki-studio-av-mode-map
+    (kbd "gr") #'ki-studio-av-refresh
+    (kbd "q") #'quit-window))
 
 (provide 'ki-studio-remote)
 ;;; ki-studio-remote.el ends here

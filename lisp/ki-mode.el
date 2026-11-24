@@ -501,7 +501,8 @@ moment, so this is kept until a KI file is saved or 5 minutes pass."
 ;;; Lints
 
 (defvar ki-lint-functions
-  '(ki-lint-scope-in-when
+  '(ki-lint-starts-with-ki
+    ki-lint-scope-in-when
     ki-lint-leading-slash
     ki-lint-regex-literals
     ki-lint-write-once
@@ -544,6 +545,17 @@ END is after the closing slash, nil for an unterminated literal."
                              (ignore-errors (scan-sexps open 1))))
                   literals))))
       (nreverse literals))))
+
+(defun ki-lint-starts-with-ki (_occs)
+  "A KI starts with `ki'; anything before it, comments too, is rejected.
+The check endpoint then answers only \"unsupported format\", without a
+line, so point at the cause here."
+  (save-excursion
+    (goto-char (point-min))
+    (skip-chars-forward " \t\n")
+    (unless (or (eobp) (looking-at ki--section-line-re))
+      (list (list (point) (line-end-position) :error
+                  "A KI starts with `ki' on the first line; text before it, comments too, makes check answer \"unsupported format\". Move comments under `ki'")))))
 
 (defun ki-lint-scope-in-when (occs)
   "A bare X@scope in `when' passes the validator and crashes the compiler."
