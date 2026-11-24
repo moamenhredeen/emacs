@@ -1114,6 +1114,13 @@ Returns non-nil when it handled URL, which stops
   (define-key pdf-view-mode-map (kbd "C-c d") #'my/pdf-section-link-store)
   (define-key pdf-view-mode-map (kbd "C-c h") #'my/pdf-annot-link-store))
 
+(use-package org-todoist
+  :vc (:url "https://github.com/Lillenne/org-todoist"
+       :rev :newest        ; latest commit; omit to use the last tagged release
+       :branch "main")
+  :config
+  (setq org-todoist-api-token "0187338b068672d9eba165ac6791f10eaf362554"
+		org-todoist-storage-dir my/notes-directory))
 
 ;; ***********************************************************************
 ;; ***
@@ -1137,9 +1144,12 @@ Returns non-nil when it handled URL, which stops
 		 evil-surround general git-gutter gnu-elpa-keyring-update
 		 hackernews jupyter kdl-mode kotlin-mode log4j-mode lsp-mode
 		 lua-mode magit marginalia markdown-mode modus-themes olivetti
-		 orderless org-journal org-modern org-pdftools plantuml-mode
-		 powershell restclient rustic shell-maker spinner treemacs
-		 vertico web-mode yaml)))
+		 orderless org-journal org-modern org-pdftools org-todoist
+		 plantuml-mode powershell restclient rustic shell-maker
+		 spinner treemacs vertico web-mode yaml))
+ '(package-vc-selected-packages
+   '((org-todoist :url "https://github.com/Lillenne/org-todoist" :branch
+				  "main"))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
