@@ -18,8 +18,18 @@
 ;;
 ;; Provides highlighting (including /regex/ literals after =~ and ${...}
 ;; interpolation in strings), comments, indentation, imenu and outline.
+;;
+;; Across the KI files of a project it also provides xref (M-. lists the
+;; KIs that write a variable, M-? every use), completion of variable and
+;; attribute names, and a flymake backend for the traps of the language
+;; that pass the validator and then never fire.
 
 ;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+(require 'xref)
+(require 'flymake)
 
 (defgroup ki nil
   "Major mode for HIRO Knowledge Items."
@@ -49,6 +59,10 @@
 (defconst ki--section-re
   (rx (or "ki" "on" "when" "do") (* blank) eol)
   "Section keyword, matched from the first non-blank character of a line.")
+
+(defconst ki--section-line-re
+  (rx bol (group (or "ki" "on" "when" "do")) (* blank) eol)
+  "Section line, the keyword in group 1.")
 
 
 ;;; Syntax
@@ -255,6 +269,442 @@ back to their first line."
         (save-excursion (indent-line-to indent))))))
 
 
+;;; Variable occurrences
+
+(cl-defstruct (ki-occ (:constructor ki-occ-create) (:copier nil))
+  "One use of a variable or attribute name in a KI.
+KIND is `node' (read in `on'), `read' or `guard' (read in `when',
+`guard' after `not'), `assign' (bare `=' or `set'), `add', `delete' or
+`read' in `do'."
+  name ctx kind section beg end line col text)
+
+(defconst ki--symbol-re
+  (rx symbol-start (any "A-Za-z_") (* (or (syntax word) (syntax symbol))))
+  "A name, including an `@context' suffix and `/' path separators.")
+
+(defconst ki--non-variables
+  (append ki-section-keywords ki-keywords ki-builtins '("true" "false")))
+
+(defun ki--setup-syntax ()
+  "Give the current buffer the syntax of KI code, without the mode."
+  (set-syntax-table ki-mode-syntax-table)
+  (setq-local syntax-propertize-function ki-syntax-propertize))
+
+(defun ki--variable-token-p (beg end name)
+  "Non-nil if NAME between BEG and END is a variable or attribute.
+Excludes text in strings, comments and regexes, calls, keyword
+arguments, LOCAL::/QUERY:: names and UPPERCASE aliases."
+  (and (not (nth 8 (ki--ppss beg)))
+       (not (memq (char-before beg) '(?: ?.)))
+       (not (memq (char-after end) '(?\( ?. ?:)))
+       (not (member name ki--non-variables))
+       (let ((case-fold-search nil))
+         (not (string-match-p (rx bos (any "A-Z") (* (any "A-Z0-9_")) eos)
+                              name)))))
+
+(defun ki--occurrence-kind (section beg end)
+  "Classify the name between BEG and END, which sits in SECTION."
+  (save-excursion
+    (pcase section
+      ('on 'node)
+      ('when
+       (goto-char beg)
+       (if (looking-back (rx "not" (+ blank)) (line-beginning-position))
+           'guard
+         'read))
+      (_
+       (goto-char beg)
+       (cond
+        ((looking-back (rx "add(" (* blank)) (line-beginning-position)) 'add)
+        ((looking-back (rx "set(" (* blank)) (line-beginning-position)) 'assign)
+        ((looking-back (rx "delete(" (* blank)) (line-beginning-position))
+         'delete)
+        ((progn (goto-char end)
+                (looking-at (rx (? "[" (* (not (any "]\n"))) "]")
+                                (* blank) "=" (not (any "=~")))))
+         'assign)
+        (t 'read))))))
+
+(defun ki--scan ()
+  "Return the variable and attribute occurrences of the buffer, in order."
+  (save-excursion
+    (syntax-propertize (point-max))
+    (goto-char (point-min))
+    (let ((line 1) section occs)
+      (while (not (eobp))
+        (if (looking-at ki--section-line-re)
+            (setq section (intern (match-string-no-properties 1)))
+          (when (memq section '(on when do))
+            (let ((bol (point))
+                  (eol (line-end-position)))
+              (while (re-search-forward ki--symbol-re eol t)
+                (let* ((beg (match-beginning 0))
+                       (end (match-end 0))
+                       (parts (split-string (match-string-no-properties 0) "@"))
+                       (name (car parts)))
+                  (when (ki--variable-token-p beg end name)
+                    (push (ki-occ-create
+                           :name name :ctx (cadr parts)
+                           :kind (ki--occurrence-kind section beg end)
+                           :section section :beg beg :end end
+                           :line line :col (- beg bol)
+                           :text (buffer-substring-no-properties bol eol))
+                          occs)))))))
+        (forward-line 1)
+        (setq line (1+ line)))
+      (nreverse occs))))
+
+
+;;; Project index
+
+(defcustom ki-root-markers '("README.md" ".git")
+  "Files marking the directory whose KI files belong together.
+The first marker found above a KI file wins, not the nearest."
+  :type '(repeat string))
+
+(defvar-local ki-project-directory nil
+  "Directory holding the KI files of this project.
+When nil, found from `ki-root-markers'.")
+(put 'ki-project-directory 'safe-local-variable #'stringp)
+
+(defun ki--root ()
+  "Directory whose KI files belong to the current one, or nil."
+  (or ki-project-directory
+      (let ((dir (if buffer-file-name
+                     (file-name-directory buffer-file-name)
+                   default-directory)))
+        (seq-some (lambda (marker) (locate-dominating-file dir marker))
+                  ki-root-markers))))
+
+(defvar ki--file-cache (make-hash-table :test #'equal)
+  "File name -> (MODIFICATION-TIME . OCCURRENCES).")
+
+(defvar ki--from-buffers t
+  "Non-nil to read files with unsaved changes from their buffer.")
+
+(defun ki--file-occurrences (file)
+  "Occurrences in FILE, from its buffer when that has unsaved changes.
+See `ki--from-buffers'."
+  (let ((buffer (get-file-buffer file)))
+    (if (and ki--from-buffers buffer (buffer-modified-p buffer))
+        (with-current-buffer buffer (ki--scan))
+      (let ((mtime (file-attribute-modification-time (file-attributes file)))
+            (cached (gethash file ki--file-cache)))
+        (if (and cached (equal (car cached) mtime))
+            (cdr cached)
+          (let ((occs (with-temp-buffer
+                        (insert-file-contents file)
+                        (ki--setup-syntax)
+                        (ki--scan))))
+            (puthash file (cons mtime occs) ki--file-cache)
+            occs))))))
+
+(defun ki--project-occurrences ()
+  "Alist (FILE . OCCURRENCES) over all KI files of the project."
+  (when-let* ((root (ki--root)))
+    (mapcar (lambda (file) (cons file (ki--file-occurrences file)))
+            (directory-files-recursively root (rx ".ki" eos)))))
+
+(defvar ki--names-cache nil
+  "(ROOT TIME . NAMES), see `ki--names'.")
+
+(defun ki--names ()
+  "Alist (NAME . ISSUE-P) of the names used in the project.
+ISSUE-P is non-nil for issue variables, nil for node attributes.
+Completion asks on every key, and checking 500 files takes a noticeable
+moment, so this is kept until a KI file is saved or 5 minutes pass."
+  (let ((root (ki--root)))
+    (if (and ki--names-cache
+             (equal (car ki--names-cache) root)
+             (< (float-time (time-since (cadr ki--names-cache))) 300))
+        (cddr ki--names-cache)
+      (let ((table (make-hash-table :test #'equal))
+            ;; saved files only, or the word being typed becomes a name
+            (ki--from-buffers nil))
+        (pcase-dolist (`(,_ . ,occs) (ki--project-occurrences))
+          (dolist (occ occs)
+            (when (or (not (eq (ki-occ-kind occ) 'node))
+                      (not (gethash (ki-occ-name occ) table)))
+              (puthash (ki-occ-name occ) (not (eq (ki-occ-kind occ) 'node))
+                       table))))
+        (let (names)
+          (maphash (lambda (k v) (push (cons k v) names)) table)
+          (setq ki--names-cache (cons root (cons (current-time) names)))
+          names)))))
+
+(defun ki--forget-names ()
+  "Drop the cached names; a saved KI may use new ones."
+  (setq ki--names-cache nil))
+
+
+;;; Xref
+
+(defun ki-xref-backend ()
+  "Xref backend for KI variables."
+  'ki)
+
+(cl-defmethod xref-backend-identifier-at-point ((_backend (eql ki)))
+  (when-let* ((symbol (thing-at-point 'symbol t)))
+    (car (split-string symbol "@"))))
+
+(cl-defmethod xref-backend-identifier-completion-table ((_backend (eql ki)))
+  (mapcar #'car (ki--names)))
+
+(defun ki--xrefs (name predicate)
+  "Xrefs to the occurrences of NAME that satisfy PREDICATE."
+  (let (xrefs)
+    (pcase-dolist (`(,file . ,occs) (ki--project-occurrences))
+      (dolist (occ occs)
+        (when (and (equal (ki-occ-name occ) name) (funcall predicate occ))
+          (push (xref-make (format "%-6s %s" (ki-occ-kind occ)
+                                   (string-trim (ki-occ-text occ)))
+                           (xref-make-file-location file (ki-occ-line occ)
+                                                    (ki-occ-col occ)))
+                xrefs))))
+    (nreverse xrefs)))
+
+(cl-defmethod xref-backend-definitions ((_backend (eql ki)) name)
+  ;; the KIs that write it; a node attribute or an engine variable like
+  ;; ProcessIssue has no writer, so fall back to every use
+  (or (ki--xrefs name (lambda (occ) (memq (ki-occ-kind occ) '(assign add))))
+      (ki--xrefs name #'always)))
+
+(cl-defmethod xref-backend-references ((_backend (eql ki)) name)
+  (ki--xrefs name #'always))
+
+
+;;; Completion
+
+(defun ki-completion-at-point ()
+  "Complete variable and attribute names, keywords and builtins."
+  (unless (nth 8 (ki--ppss (point)))
+    (let* ((pos (point))
+           (bounds (bounds-of-thing-at-point 'symbol))
+           (start (if bounds (car bounds) pos))
+           (end (if bounds (cdr bounds) pos))
+           (at (save-excursion
+                 (goto-char start)
+                 (search-forward "@" pos t))))
+      (if at
+          (list at end '("any" "self" "scope") :exclusive 'no)
+        (let ((names (ki--names)))
+          (list start end
+                (append (mapcar #'car names) ki-builtins ki-keywords)
+                :exclusive 'no
+                :annotation-function
+                (lambda (candidate)
+                  (let ((entry (assoc candidate names)))
+                    (cond (entry (if (cdr entry) " issue" " node"))
+                          ((member candidate ki-builtins) " builtin"))))))))))
+
+
+;;; Lints
+
+(defvar ki-lint-functions
+  '(ki-lint-scope-in-when
+    ki-lint-leading-slash
+    ki-lint-regex-literals
+    ki-lint-write-once
+    ki-lint-read-and-write
+    ki-lint-execidle
+    ki-lint-count-in-with)
+  "Functions run by `ki-flymake', a hook.
+Each is called with the occurrences of the buffer (see `ki--scan') and
+returns a list of (BEG END TYPE MESSAGE), TYPE being :error, :warning
+or :note.")
+
+(defun ki--map-section-lines (sections fn)
+  "Call FN at the start of each line in SECTIONS, a list of symbols.
+FN gets the section; collect and return its non-nil results."
+  (save-excursion
+    (goto-char (point-min))
+    (let (section results)
+      (while (not (eobp))
+        (if (looking-at ki--section-line-re)
+            (setq section (intern (match-string-no-properties 1)))
+          (when (memq section sections)
+            (when-let* ((result (save-excursion (funcall fn section))))
+              (push result results))))
+        (forward-line 1))
+      (nreverse results))))
+
+(defun ki--regex-literals ()
+  "List of (OPEN . END) for each /regex/ literal after `=~'.
+END is after the closing slash, nil for an unterminated literal."
+  (save-excursion
+    (syntax-propertize (point-max))
+    (goto-char (point-min))
+    (let (literals)
+      (while (re-search-forward (rx "=~" (* blank) "/") nil t)
+        (let ((open (1- (point))))
+          (unless (nth 8 (ki--ppss (match-beginning 0)))
+            (push (cons open
+                        (and (equal (get-text-property open 'syntax-table)
+                                    (string-to-syntax "|"))
+                             (ignore-errors (scan-sexps open 1))))
+                  literals))))
+      (nreverse literals))))
+
+(defun ki-lint-scope-in-when (occs)
+  "A bare X@scope in `when' passes the validator and crashes the compiler."
+  (cl-loop for occ in occs
+           when (and (eq (ki-occ-section occ) 'when)
+                     (equal (ki-occ-ctx occ) "scope"))
+           collect (list (ki-occ-beg occ) (ki-occ-end occ) :error
+                         "X@scope in `when' crashes the compiler; use @self or @any")))
+
+(defun ki-lint-leading-slash (_occs)
+  "A free attribute is written without its leading slash."
+  (ki--map-section-lines
+   '(on when)
+   (lambda (_section)
+     (when (looking-at (rx (* blank) (? "not" (+ blank))
+                           (group "/" (any "A-Za-z_"))))
+       (list (match-beginning 1) (line-end-position) :error
+             "Free attribute with a leading `/': write `/x' as `x', or the rest is read as a regex")))))
+
+(defun ki-lint-regex-literals (_occs)
+  "Unterminated literals, literals cut short by a `/', umlauts in classes."
+  (let (diags)
+    (pcase-dolist (`(,open . ,end) (ki--regex-literals))
+      (if (not end)
+          (push (list open (save-excursion (goto-char open) (line-end-position))
+                      :error "Unterminated regex literal")
+                diags)
+        (let ((rest (save-excursion
+                      (goto-char end)
+                      (skip-chars-forward " \t")
+                      (unless (or (eolp) (looking-at (rx (or "or" "and") symbol-end)))
+                        (point)))))
+          (when rest
+            (push (list (1- end) (save-excursion (goto-char rest) (line-end-position))
+                        :error "A `/' ends the regex literal here; escape it as `\\/'")
+                  diags)))
+        (setq diags (nconc (ki--class-umlauts (1+ open) (1- end)) diags))))
+    diags))
+
+(defun ki--class-umlauts (beg end)
+  "Diagnostics for [...] classes with non-ASCII between BEG and END.
+The regex works on bytes, and an umlaut is two bytes in UTF-8, so such a
+class matches half an umlaut.  Followed by a quantifier it still
+matches the whole word, so only a class without one is reported."
+  (let ((pos beg) class-start non-ascii diags)
+    (while (< pos end)
+      (let ((c (char-after pos)))
+        (cond
+         ((eq c ?\\) (setq pos (1+ pos)))
+         ((and (not class-start) (eq c ?\[))
+          (setq class-start pos non-ascii nil)
+          ;; a ] right after [ or [^ is a literal
+          (when (eq (char-after (1+ pos)) ?^) (setq pos (1+ pos)))
+          (when (eq (char-after (1+ pos)) ?\]) (setq pos (1+ pos))))
+         ((and class-start (eq c ?\]))
+          (when (and non-ascii (not (memq (char-after (1+ pos)) '(?* ?+ ?{))))
+            (push (list class-start (1+ pos) :warning
+                        "Non-ASCII in a character class matches one byte of it; write it out: (a|ä|ae)")
+                  diags))
+          (setq class-start nil))
+         ((and class-start (> c 127)) (setq non-ascii t))))
+      (setq pos (1+ pos)))
+    diags))
+
+(defun ki--issue-name-p (occ)
+  "Non-nil if OCC names an issue variable rather than a node attribute."
+  (not (string-prefix-p "ogit/" (ki-occ-name occ))))
+
+(defun ki-lint-write-once (occs)
+  "A registered variable is assigned at most once per KI."
+  (let ((seen (make-hash-table :test #'equal)) diags)
+    (dolist (occ occs)
+      (when (and (eq (ki-occ-kind occ) 'assign) (ki--issue-name-p occ))
+        (if (gethash (ki-occ-name occ) seen)
+            (push (list (ki-occ-beg occ) (ki-occ-end occ) :warning
+                        (format "%s is assigned twice: a registered variable is write-once per KI, even across branches"
+                                (ki-occ-name occ)))
+                  diags)
+          (puthash (ki-occ-name occ) t seen))))
+    diags))
+
+(defun ki-lint-read-and-write (occs)
+  "A registered variable may not be read and assigned by the same KI."
+  (let ((read (cl-loop for occ in occs
+                       when (and (eq (ki-occ-kind occ) 'read)
+                                 (eq (ki-occ-section occ) 'when))
+                       collect (ki-occ-name occ))))
+    (cl-loop for occ in occs
+             when (and (eq (ki-occ-kind occ) 'assign)
+                       (ki--issue-name-p occ)
+                       (member (ki-occ-name occ) read))
+             collect (list (ki-occ-beg occ) (ki-occ-end occ) :warning
+                           (format "%s is read in `when' and assigned here; one KI cannot read and write a registered variable"
+                                   (ki-occ-name occ))))))
+
+(defun ki-lint-execidle (occs)
+  "A KI testing ExecIdle has to switch itself off."
+  (when-let* ((idle (cl-find-if (lambda (occ)
+                                 (and (equal (ki-occ-name occ) "ExecIdle")
+                                      (eq (ki-occ-section occ) 'when)))
+                               occs)))
+    (let ((waits (cl-loop for occ in occs
+                          when (eq (ki-occ-kind occ) 'read)
+                          collect (ki-occ-name occ)))
+          (guards (cl-loop for occ in occs
+                           when (eq (ki-occ-kind occ) 'guard)
+                           collect (ki-occ-name occ))))
+      (unless (or (cl-some (lambda (occ)
+                             (pcase (ki-occ-kind occ)
+                               ('delete (member (ki-occ-name occ) waits))
+                               ((or 'assign 'add) (member (ki-occ-name occ) guards))))
+                           occs)
+                  (save-excursion
+                    (goto-char (point-min))
+                    (re-search-forward (rx symbol-start "stop_issue(") nil t)))
+        (list (list (ki-occ-beg idle) (ki-occ-end idle) :warning
+                    "Tests ExecIdle but never switches itself off: delete the ToDo it waits on, or set a marker it guards with `not'"))))))
+
+(defun ki-lint-count-in-with (_occs)
+  "Comparing a `count' alias inside the enclosing `with' never fires."
+  (let (stack aliases)
+    (ki--map-section-lines
+     '(on when)
+     (lambda (_section)
+       (back-to-indentation)
+       (let ((closed (ki--line-ends-with (rx symbol-start "end"))))
+         (cond
+          ((looking-at (rx "end" symbol-end)) (pop stack) nil)
+          ((looking-at (rx (? "not" (+ blank)) "with" blank))
+           (unless closed (push 'with stack))
+           nil)
+          ((looking-at (rx "count" blank (* nonl) blank "as" (+ blank)
+                           (group (+ (any "A-Z0-9_")))))
+           (when (memq 'with stack)
+             (push (match-string-no-properties 1) aliases))
+           (unless closed (push 'count stack))
+           nil)
+          ((and (memq 'with stack)
+                (looking-at (rx (group (+ (any "A-Z0-9_"))) (* blank)
+                                (or "<" ">" "==" "!=")))
+                (member (match-string-no-properties 1) aliases))
+           (list (match-beginning 1) (match-end 1) :warning
+                 "Inside `with' this is read as an attribute of the alias and never fires; compare after the `end' of `with'"))))))))
+
+(defun ki-flymake (report-fn &rest _)
+  "Flymake backend running `ki-lint-functions'."
+  (let ((occs (ki--scan)) diags)
+    (run-hook-wrapped
+     'ki-lint-functions
+     (lambda (fn)
+       (condition-case err
+           (setq diags (nconc (funcall fn occs) diags))
+         (error (message "ki-mode: lint %s failed: %S" fn err)))
+       nil))
+    (funcall report-fn
+             (mapcar (pcase-lambda (`(,beg ,end ,type ,message))
+                       (flymake-make-diagnostic (current-buffer) beg end
+                                                type message))
+                     diags))))
+
+
 ;;; Mode
 
 ;;;###autoload
@@ -281,7 +731,11 @@ back to their first line."
                  ,(rx "(?<" (group (any "A-Za-z_") (* (any "A-Za-z0-9_"))) ">")
                  1)
                 (nil ,(rx bol (group (or "ki" "on" "when" "do")) (* blank) eol)
-                     1))))
+                     1)))
+  (add-hook 'xref-backend-functions #'ki-xref-backend nil t)
+  (add-hook 'completion-at-point-functions #'ki-completion-at-point nil t)
+  (add-hook 'flymake-diagnostic-functions #'ki-flymake nil t)
+  (add-hook 'after-save-hook #'ki--forget-names nil t))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.ki\\'" . ki-mode))
