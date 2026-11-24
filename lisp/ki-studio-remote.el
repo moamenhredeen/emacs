@@ -785,6 +785,9 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
 
 (defvar ki-studio--issue-history nil "Issue ids read before.")
 
+(defvar ki-studio--session-by-root (make-hash-table :test #'equal)
+  "Checkout root -> (ID . TITLE) of the teaching session in focus.")
+
 (defvar ki-studio--last-root nil
   "The checkout of the last issue or job description shown.
 Links followed outside a checkout, in a note say, read from there.")
@@ -863,9 +866,10 @@ and symbols like … or ✓ are counted wider in some setups than drawn."
   (when (fboundp 'evil-normalize-keymaps)
     (evil-normalize-keymaps)))
 
-(defun ki-studio--show-org (buffer text refresh root)
+(defun ki-studio--show-org (buffer text refresh root &optional wrap)
   "Show org TEXT in BUFFER, read-only; REFRESH reads it again.
-ROOT is the checkout the view belongs to."
+ROOT is the checkout the view belongs to.  Long lines are cut, which
+keeps wide tables readable, unless WRAP: then they wrap, for prose."
   (setq ki-studio--last-root root)
   (with-current-buffer buffer
     (let ((inhibit-read-only t))
@@ -874,7 +878,8 @@ ROOT is the checkout the view belongs to."
     (org-mode)
     (setq default-directory root
           ki-studio--view-refresh refresh
-          truncate-lines t)
+          truncate-lines (not wrap))
+    (visual-line-mode (if wrap 1 -1))
     (let ((inhibit-read-only t))
       (org-table-map-tables #'org-table-align t))
     (set-buffer-modified-p nil)
@@ -1000,10 +1005,11 @@ rule that did not fire.  FILES maps KI names to files."
                        (format "  - … %d weitere (M-? auf %s)\n" (- (length waiting) 15) todo)))))
       (remove "ProcessIssue" open) ""))))
 
-(defun ki-studio--issue-org (env issue fired files todos)
+(defun ki-studio--issue-org (env issue fired files todos &optional session)
   "The org text of the view of ISSUE in ENV.
 FIRED are its fired KIs, FILES maps KI names to files, TODOS are the
-agenda ToDos."
+agenda ToDos.  SESSION, (ID TITLE . STEP-INDEX) of the session in focus,
+adds the step of each fired KI."
   (let* ((id (alist-get 'ogit/_id issue))
          (status (format "%s" (alist-get 'ogit/status issue)))
          (jd-id (alist-get 'ogit/Automation/originNode issue))
@@ -1035,6 +1041,10 @@ agenda ToDos."
      (format "- Offen :: %s\n" (if open (string-join open ", ") "-"))
      (and question (format "- Rückfrage :: %s\n" (ki-studio--org-text question)))
      (format "- Issue :: %s\n" (ki-studio--org-link (concat "ki-issue:" id) id))
+     (and session
+          (format "- Sitzung :: %s (Schritte im Gefeuert)\n"
+                  (ki-studio--org-link (concat "ki-session:" (car session))
+                                       (ki-studio--org-text (cadr session)))))
      (unless (member status '("RESOLVED" "RESOLVED_EXTERNAL"))
        (ki-studio--org-halt env fired lines open files))
      (format "* Begründung (%d)\n" (length lines))
@@ -1061,14 +1071,17 @@ agenda ToDos."
       (format "Gefeuert (%d%s)" (length fired)
               (if (and fired (null (caar fired))) ", ohne Reihenfolge" "")))
      (and fired
-          (concat (ki-studio--org-row "#" "ms" "KI")
-                  "|-\n"
-                  (mapconcat (pcase-lambda (`(,count ,millis ,ki ,_node))
-                               (ki-studio--org-row
-                                (format "%s" (or count "-"))
-                                (if (and millis t0) (format "%d" (- millis t0)) "")
-                                (ki-studio--org-ki (ki-studio--ki-name env ki) files)))
-                             fired "")))
+          (let ((index (cddr session)))
+            (concat (apply #'ki-studio--org-row "#" "ms" (if index '("Schritt" "KI") '("KI")))
+                    "|-\n"
+                    (mapconcat (pcase-lambda (`(,count ,millis ,ki ,_node))
+                                 (apply #'ki-studio--org-row
+                                        (format "%s" (or count "-"))
+                                        (if (and millis t0) (format "%d" (- millis t0)) "")
+                                        (append
+                                         (and index (list (string-join (gethash ki index) ", ")))
+                                         (list (ki-studio--org-ki (ki-studio--ki-name env ki) files)))))
+                               fired ""))))
      (ki-studio--org-folded (format "Variablen (%d)" (length variables)))
      (ki-studio--org-row "Variable" "Wert")
      "|-\n"
@@ -1087,11 +1100,254 @@ justification lines, the fired KIs and all variables."
          (issue (ki-studio--reading "Reading the issue" (ki-hiro-get env id)))
          (fired (ki-studio--reading "Reading the fired KIs" (ki-studio--fired env issue)))
          (files (ki-studio--files-by-name))
-         (todos (cons "ProcessIssue" (mapcar #'cdr (ki-studio--todo-map)))))
+         (todos (cons "ProcessIssue" (mapcar #'cdr (ki-studio--todo-map))))
+         (focus (gethash root ki-studio--session-by-root))
+         (session (and focus
+                       (cons (car focus)
+                             (cons (cdr focus)
+                                   (ki-studio--step-index
+                                    (ki-studio--session-steps env (car focus))))))))
     (ki-studio--show-org (get-buffer-create (format "*ki issue: …%s*" (substring id -8)))
-                         (ki-studio--issue-org env issue fired files todos)
+                         (ki-studio--issue-org env issue fired files todos session)
                          (lambda () (ki-studio-issue id))
                          root)))
+
+;;; Teaching sessions
+
+(defvar ki-studio--session-cache (make-hash-table :test #'equal)
+  "Session id -> its steps (see `ki-studio--session-steps'), read once.")
+
+(defun ki-studio--position< (a b)
+  "Non-nil if the step position A (\"3.1\") comes before B."
+  (let ((x (mapcar #'string-to-number (split-string (format "%s" (or a "0")) "\\.")))
+        (y (mapcar #'string-to-number (split-string (format "%s" (or b "0")) "\\."))))
+    (while (and x y (= (car x) (car y)))
+      (setq x (cdr x) y (cdr y)))
+    (if (and x y) (< (car x) (car y)) (and (null x) y t))))
+
+(defun ki-studio--walk-steps (env edges depth seen)
+  "The steps the out EDGES of a session or step lead to, and theirs.
+In order, depth first; DEPTH is their nesting, SEEN the ids walked."
+  (let* ((ids (cl-loop for edge in edges
+                       for id = (alist-get 'ogit/_in-id edge)
+                       when (and (equal (alist-get 'ogit/_in-type edge) "ogit/Knowledge/Step")
+                                 (not (member id seen)))
+                       collect id))
+         (seen (append ids seen))
+         (steps (sort (mapcar (lambda (id) (ki-hiro-get env id)) ids)
+                      (lambda (a b) (ki-studio--position< (alist-get 'ogit/positionNumber a)
+                                                          (alist-get 'ogit/positionNumber b))))))
+    (cl-loop for step in steps
+             for own = (ki-hiro-out-edges env (alist-get 'ogit/_id step))
+             nconc (cons (list :id (alist-get 'ogit/_id step)
+                               :position (format "%s" (or (alist-get 'ogit/positionNumber step) "-"))
+                               :title (or (alist-get 'ogit/title step) "")
+                               :text (alist-get 'ogit/description step)
+                               :depth depth
+                               ;; the defines edge, step -> KI
+                               :kis (cl-loop for edge in own
+                                             when (equal (alist-get 'ogit/_in-type edge)
+                                                         "ogit/Automation/KnowledgeItem")
+                                             collect (alist-get 'ogit/_in-id edge)))
+                         (ki-studio--walk-steps env own (1+ depth) seen)))))
+
+(defun ki-studio--session-steps (env id &optional refresh)
+  "The steps of session ID, as plists (:id :position :title :text :depth :kis).
+Read once per Emacs session unless REFRESH."
+  (or (and (not refresh) (gethash id ki-studio--session-cache))
+      (puthash id (ki-studio--reading "Reading the steps"
+                    (ki-studio--walk-steps env (ki-hiro-out-edges env id) 0 (list id)))
+               ki-studio--session-cache)))
+
+(defun ki-studio--step-index (steps)
+  "Hash: KI id -> positions of the STEPS that define it."
+  (let ((index (make-hash-table :test #'equal)))
+    (dolist (step steps)
+      (dolist (ki (plist-get step :kis))
+        (puthash ki (append (gethash ki index) (list (plist-get step :position))) index)))
+    index))
+
+(defun ki-studio-select-session (id title)
+  "Focus the teaching session ID (titled TITLE).
+The issue view then names the step of each fired KI."
+  (interactive
+   (let* ((env (ki-studio--env))
+          (sessions (sort (ki-studio--reading "Listing sessions"
+                            (ki-hiro-vertices env (ki-hiro-type-query env "ogit/Knowledge/AcquisitionSession")
+                                              "ogit/_id,ogit/title,ogit/_created-on"))
+                          (lambda (a b) (> (string-to-number (or (alist-get 'ogit/title a) ""))
+                                           (string-to-number (or (alist-get 'ogit/title b) ""))))))
+          (table (mapcar (lambda (s)
+                           (cons (format "%s  […%s]" (or (alist-get 'ogit/title s) "?")
+                                         (substring (alist-get 'ogit/_id s) -8))
+                                 s))
+                         sessions))
+          (focused (car (gethash (ki-studio--root) ki-studio--session-by-root)))
+          (current (car (seq-find (lambda (entry) (equal (alist-get 'ogit/_id (cdr entry)) focused))
+                                  table)))
+          (session (cdr (assoc (completing-read
+                                (if current
+                                    (format "Sitzung (im Fokus: %s): "
+                                            (alist-get 'ogit/title (cdr (assoc current table))))
+                                  "Sitzung: ")
+                                table nil t nil nil current)
+                               table))))
+     (list (alist-get 'ogit/_id session) (alist-get 'ogit/title session))))
+  (puthash (ki-studio--root) (cons id title) ki-studio--session-by-root)
+  (message "Sitzung im Fokus: %s" title))
+
+(defun ki-studio--session-org (env title id steps files pool)
+  "The org text of the session ID titled TITLE with its STEPS.
+FILES maps KI names to files, POOL lists the deployed KI ids."
+  (let ((kis (delete-dups (apply #'append (mapcar (lambda (s) (plist-get s :kis)) steps)))))
+    (concat
+     (format "#+title: Sitzung %s\n#+startup: showall\n#+options: ^:nil\n\n"
+             (ki-studio--org-text title))
+     "* Überblick\n"
+     (format "- Sitzung :: %s\n" (ki-studio--org-link (concat "ki-session:" id)
+                                                       (ki-studio--org-text title)))
+     (format "- Schritte :: %d, davon %d ohne KI\n" (length steps)
+             (seq-count (lambda (s) (null (plist-get s :kis))) steps))
+     (format "- KIs :: %d, davon %d im Pool, %d mit Datei in ki/\n" (length kis)
+             (seq-count (lambda (ki) (member ki pool)) kis)
+             (seq-count (lambda (ki) (gethash (ki-studio--ki-name env ki) files)) kis))
+     (mapconcat
+      (lambda (step)
+        (concat
+         (make-string (1+ (plist-get step :depth)) ?*) " "
+         (plist-get step :position) " " (ki-studio--org-text (plist-get step :title))
+         (if (plist-get step :kis) "" "  :ohne_ki:") "\n"
+         ;; indented, so a `*' at the start of a line in the text is no heading
+         (when-let* ((text (plist-get step :text)))
+           (concat (mapconcat (lambda (line) (if (string-blank-p line) "" (concat "  " line)))
+                              (split-string (string-trim-right text) "\n") "\n")
+                   "\n"))
+         (mapconcat (lambda (ki)
+                      (let ((name (ki-studio--ki-name env ki)))
+                        (format "  - KI :: %s, %s\n" (ki-studio--org-ki name files)
+                                (if (member ki pool) "im Pool" "NICHT im Pool"))))
+                    (plist-get step :kis) "")))
+      steps ""))))
+
+(defun ki-studio-show-session (id &optional refresh)
+  "Show the teaching session ID with its steps and their KIs; focus it.
+REFRESH reads the steps again."
+  (let* ((env (ki-studio--env))
+         (root (ki-studio--root))
+         (title (or (alist-get 'ogit/title (ki-hiro-get env id)) id))
+         (steps (ki-studio--session-steps env id refresh))
+         (pool (ki-studio--pool-kis env refresh))
+         (files (ki-studio--files-by-name)))
+    (puthash root (cons id title) ki-studio--session-by-root)
+    (ki-studio--show-org (get-buffer-create (format "*ki sitzung: %s*"
+                                                    (car (split-string title "_"))))
+                         (ki-studio--session-org env title id steps files pool)
+                         (lambda () (ki-studio-show-session id t))
+                         root t)))
+
+(defun ki-studio-session ()
+  "Pick a teaching session and show its steps, their text and their KIs.
+The session in focus is the default; the issue view uses it to name the
+step of each fired KI."
+  (interactive)
+  (call-interactively #'ki-studio-select-session)
+  (ki-studio-show-session (car (gethash (ki-studio--root) ki-studio--session-by-root))))
+
+(with-eval-after-load 'ol
+  (org-link-set-parameters
+   "ki-session" :follow (lambda (id _) (ki-studio--in-root (lambda () (ki-studio-show-session id))))
+   :export #'ki-studio--export-id-link))
+
+
+;;; Creating a test issue
+
+;; As _kat2_review/_start_issue.py does it (DLR-projektwissen, Werkzeuge;
+;; METHODE C1 step 1): the body of `bin/issue_tool.py create --subject
+;; GradePosition --origin-node <JD>', shown as a dry run first, written
+;; only on request; the target checked by title and id before, the issue
+;; read back after (regeln.md, Schreiben).  The issue is EMPTY: no
+;; Anlass and no pay grades of a real case.
+
+(defun ki-studio--issue-body (env jd-id)
+  "The body of a test issue on the job description JD-ID in ENV."
+  `((ogit/Automation/originNode . ,jd-id)
+    (ogit/subject . "GradePosition")
+    (/ProcessIssue . "on")
+    (ogit/_scope . ,(ki-hiro-env-scope env))
+    (ogit/_type . "ogit/Automation/AutomationIssue")))
+
+(defun ki-studio--dry-run (env jd vertex counts body)
+  "The org text of the dry run for a test issue on JD, an (ID . NAME).
+VERTEX is the job description as read just now, COUNTS its WorkUnits,
+BODY the request."
+  (concat
+   (format "#+title: Testissue auf %s, Trockenlauf\n#+startup: showall\n#+options: ^:nil\n\n"
+           (ki-studio--org-text (cdr jd)))
+   "* Ziel\n"
+   (format "- Stellenbeschreibung :: %s → %s\n"
+           (ki-studio--org-link (concat "ki-jd:" (car jd))
+                                (ki-studio--org-text (alist-get 'ogit/name vertex)))
+           (car jd))
+   (format "- Fassung :: %s\n" (substring-no-properties (ki-studio--import-flag counts)))
+   (format "- Umgebung :: %s\n" (if (ki-hiro-env-prod-p env)
+                                    (upcase (ki-hiro-env-name env))
+                                  (ki-hiro-env-name env)))
+   "* Anfrage\n"
+   "POST /api/graph/7.4/new/ogit%2FAutomation%2FAutomationIssue\n"
+   "#+begin_src json\n"
+   (let ((json-encoding-pretty-print t)) (json-encode body))
+   "\n#+end_src\n"
+   "* Hinweis\n"
+   "Das Issue ist LEER: ohne Anlass und ohne Entgeltgruppen des Vorgangs. "
+   "Geprüft werden nur Regeln, die an der Stelle lesen (METHODE C1 Schritt 1).\n"))
+
+(defun ki-studio-create-issue ()
+  "Create a test issue on the focused job description, as _start_issue.py.
+Checks the job description by title and id, shows the request as a dry
+run, and writes it only after you confirm, once and without retry.
+Then reads the issue back and shows it."
+  (interactive)
+  (let* ((env (ki-studio--env))
+         (root (ki-studio--root))
+         (jd (ki-studio--jd-or-ask))
+         ;; pre-check: the target as it is now, by id and title
+         (vertex (ki-studio--reading "Checking the job description" (ki-hiro-get env (car jd))))
+         (counts (ki-studio--wu-counts (cdr (ki-studio--jd (car jd) t))))
+         (body (ki-studio--issue-body env (car jd))))
+    (unless (equal (alist-get 'ogit/_type vertex) "ogit/HR/JobDescription")
+      (user-error "%s is a %s, not a job description" (car jd) (alist-get 'ogit/_type vertex)))
+    (unless (equal (alist-get 'ogit/name vertex) (cdr jd))
+      (user-error "Job description %s is named %S now, not %S"
+                  (car jd) (alist-get 'ogit/name vertex) (cdr jd)))
+    (ki-studio--show-org (get-buffer-create "*ki testissue*")
+                         (ki-studio--dry-run env jd vertex counts body)
+                         (lambda () (ki-studio-create-issue)) root t)
+    (unless (yes-or-no-p (format "%s: Testissue auf %s anlegen%s? "
+                                 (if (ki-hiro-env-prod-p env)
+                                     (upcase (ki-hiro-env-name env))
+                                   (ki-hiro-env-name env))
+                                 (cdr jd)
+                                 (if (and (> (nth 0 counts) 0)
+                                          (= (nth 0 counts) (nth 1 counts) (nth 2 counts)))
+                                     ""
+                                   (format " (Fassung %s)"
+                                           (substring-no-properties (ki-studio--import-flag counts))))))
+      (user-error "Trockenlauf, nichts geschrieben"))
+    (let* ((created (ki-studio--reading "Creating the issue"
+                      (ki-hiro-create-vertex env "ogit/Automation/AutomationIssue" body)))
+           (id (alist-get 'ogit/_id created))
+           ;; read back: is it the issue we sent?  ProcessIssue may be gone
+           ;; already, the engine takes a new issue up at once
+           (issue (ki-hiro-get env id))
+           (wrong (cl-loop for (key . value) in body
+                           unless (or (eq key '/ProcessIssue)
+                                      (equal (alist-get key issue) value))
+                           collect (format "%s=%S" key (alist-get key issue)))))
+      (push id ki-studio--issue-history)
+      (ki-studio-issue id)
+      (message "ANGELEGT %s status=%s v=%s%s"
+               id (alist-get 'ogit/status issue) (alist-get 'ogit/_v issue)
+               (if wrong (concat ", ABER zurückgelesen: " (string-join wrong ", ")) "")))))
 
 (defvar-keymap ki-studio-issues-mode-map
   :doc "Keymap for `ki-studio-issues-mode'."

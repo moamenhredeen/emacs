@@ -25,6 +25,9 @@
 ;;   C-c C-e  choose the environment        C-c C-j  focus a job description
 ;;   C-c C-a  its WorkUnits with av*        C-c C-t  test the on part on it
 ;;   C-c C-i  read an issue                 C-c C-l  its issues
+;;   C-c C-s  a teaching session, its steps and their KIs
+;;   C-c C-r  create a test issue on the focused job description, as
+;;            _start_issue.py: dry run first, written on request (writes)
 
 ;;; Code:
 
@@ -331,6 +334,8 @@ WHERE is a line number or a variable name.")
 (autoload 'ki-studio-test-on "ki-studio-remote" nil t)
 (autoload 'ki-studio-issue "ki-studio-remote" nil t)
 (autoload 'ki-studio-issues "ki-studio-remote" nil t)
+(autoload 'ki-studio-session "ki-studio-remote" nil t)
+(autoload (quote ki-studio-create-issue) "ki-studio-remote" nil t)
 (declare-function ki-studio--env-label "ki-studio-remote")
 
 (defvar-keymap ki-studio-mode-map
@@ -344,7 +349,9 @@ WHERE is a line number or a variable name.")
   "C-c C-a" #'ki-studio-av
   "C-c C-t" #'ki-studio-test-on
   "C-c C-i" #'ki-studio-issue
-  "C-c C-l" #'ki-studio-issues)
+  "C-c C-l" #'ki-studio-issues
+  "C-c C-s" #'ki-studio-session
+  "C-c C-r" #'ki-studio-create-issue)
 
 (defun ki-studio--lighter ()
   "Mode line text: Studio and the environment, once one is chosen."

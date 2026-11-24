@@ -260,6 +260,29 @@ returned, not signalled: the caller knows which ones are an answer."
       (ki-hiro-forget-token env)
       (ki-hiro--with-retries send what))))
 
+(defun ki-hiro-write (env method path body)
+  "Send the write METHOD with BODY to PATH on ENV's server, once.
+No retry on a server error: a create answered with 503 may still have
+happened, and sending it again would make two.  A 401 is retried once
+with a fresh token; the server turned the request away unread.
+Return (STATUS . JSON-OR-TEXT)."
+  (let* ((url (concat (ki-hiro-env-server env) path))
+         (response (ki-hiro--http method url body (ki-hiro--current-token env))))
+    (if (not (eql (car response) 401))
+        response
+      (ki-hiro-forget-token env)
+      (ki-hiro--http method url body (ki-hiro--current-token env)))))
+
+(defun ki-hiro-create-vertex (env type attributes)
+  "Create a vertex of TYPE with ATTRIBUTES (an alist) in ENV; return it.
+Sent once, see `ki-hiro-write'."
+  (let ((response (ki-hiro-write env "POST"
+                                 (format "%s/new/%s" ki-hiro-graph (url-hexify-string type))
+                                 attributes)))
+    (unless (eql (car response) 200)
+      (signal 'ki-hiro-error (list "create" type (car response) (cdr response))))
+    (cdr response)))
+
 (defun ki-hiro--ok (response what)
   "The body of RESPONSE, or signal unless its status is 200."
   (unless (eql (car response) 200)
