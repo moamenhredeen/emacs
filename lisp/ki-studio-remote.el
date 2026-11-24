@@ -21,6 +21,7 @@
 (require 'ki-studio)
 (require 'ki-hiro)
 (require 'ediff)
+(require 'org)
 
 (defcustom ki-studio-pool-name "default"
   "Name of the knowledge pool whose deployed KIs count."
@@ -782,30 +783,15 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
                                     "")
                                 "," t)))))))
 
-(defvar ki-studio-issue-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map "g" #'ki-studio-issue-refresh)
-    map))
-
-(define-derived-mode ki-studio-issue-mode special-mode "KI-issue"
-  "One issue: status, result, justification lines and the KIs that fired."
-  (setq truncate-lines t))
-
-(defvar-local ki-studio--issue-id nil "Issue this buffer shows.")
-
 (defvar ki-studio--issue-history nil "Issue ids read before.")
+
+(defvar ki-studio--last-root nil
+  "The checkout of the last issue or job description shown.
+Links followed outside a checkout, in a note say, read from there.")
 
 (defun ki-studio--section (title)
   "Insert a section TITLE."
   (insert "\n" (propertize title 'face 'font-lock-keyword-face) "\n"))
-
-(defun ki-studio--insert-ki (name files root)
-  "Insert the KI NAME, as a button to its file when FILES has one.
-FILES maps names to files; ROOT is the checkout, for the help text."
-  (if-let* ((file (gethash name files)))
-      (insert-text-button name 'action (lambda (_) (find-file file))
-                          'help-echo (file-relative-name file root))
-    (insert (propertize name 'face 'shadow))))
 
 (defun ki-studio--waiting-on (todo)
   "Files of the KIs under ki/ whose `when' waits on TODO."
@@ -817,42 +803,283 @@ FILES maps names to files; ROOT is the checkout, for the help text."
                            occs)
              collect file)))
 
-(defun ki-studio--insert-halt (env fired lines open files root)
-  "Insert where a run that has not resolved stands.
+;;; Org views
+
+(defun ki-studio--org-text (value &optional width)
+  "VALUE as one line of org text, at most WIDTH characters.
+A `|' would split a table cell, so it becomes `/'; line breaks become
+spaces.  Only plain characters: org aligns tables by character width,
+and symbols like … or ✓ are counted wider in some setups than drawn."
+  (let ((text (string-trim
+               (replace-regexp-in-string
+                "[\n\r]+" " " (string-replace "|" "/" (format "%s" (or value "")))))))
+    (if width (truncate-string-to-width text width nil nil "...") text)))
+
+(defun ki-studio--org-link (target description)
+  "An org link to TARGET showing DESCRIPTION."
+  (format "[[%s][%s]]" target (replace-regexp-in-string "[][]" "" description)))
+
+(defun ki-studio--org-ki (name files)
+  "The KI NAME as a link to its file when FILES knows one."
+  (if-let* ((file (gethash name files)))
+      (ki-studio--org-link (concat "file:" file) name)
+    name))
+
+(defun ki-studio--org-row (&rest cells)
+  "An org table row of CELLS."
+  (concat "| " (string-join cells " | ") " |\n"))
+
+(defun ki-studio--org-folded (heading)
+  "HEADING, a top-level org heading that starts folded."
+  (concat "* " heading "\n:PROPERTIES:\n:VISIBILITY: folded\n:END:\n"))
+
+(defvar-keymap ki-studio-view-mode-map
+  :doc "Keymap for `ki-studio-view-mode'."
+  "g" #'ki-studio-view-refresh
+  "s" #'ki-studio-view-save-note
+  "q" #'quit-window)
+
+(defvar-local ki-studio--view-refresh nil
+  "Function that reads this view again.")
+
+(defconst ki-studio--view-keywords
+  `((,(rx "| " (group "nicht_erfuellt") " ") 1 'error prepend)
+    (,(rx "| " (group "erfuellt") " ") 1 'success prepend)
+    (,(rx "| " (group (or "info" "nicht_bewertet")) " ") 1 'shadow prepend)
+    (,(rx ":: " (group (or "STOPPED" "WAITING")) eol) 1 'warning prepend)
+    (,(rx ":: " (group "RESOLVED") eol) 1 'success prepend))
+  "Colours for results and statuses in a view.")
+
+(define-minor-mode ki-studio-view-mode
+  "A read-only KI Studio view in org: g reads again, s saves it as a note.
+
+\\{ki-studio-view-mode-map}"
+  :lighter " KI-view"
+  (if ki-studio-view-mode
+      (font-lock-add-keywords nil ki-studio--view-keywords 'append)
+    (font-lock-remove-keywords nil ki-studio--view-keywords))
+  (font-lock-flush)
+  ;; evil sees keys of a minor mode turned on later only after this
+  (when (fboundp 'evil-normalize-keymaps)
+    (evil-normalize-keymaps)))
+
+(defun ki-studio--show-org (buffer text refresh root)
+  "Show org TEXT in BUFFER, read-only; REFRESH reads it again.
+ROOT is the checkout the view belongs to."
+  (setq ki-studio--last-root root)
+  (with-current-buffer buffer
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert text))
+    (org-mode)
+    (setq default-directory root
+          ki-studio--view-refresh refresh
+          truncate-lines t)
+    (let ((inhibit-read-only t))
+      (org-table-map-tables #'org-table-align t))
+    (set-buffer-modified-p nil)
+    (setq buffer-read-only t)
+    (ki-studio-view-mode 1)
+    (org-cycle-set-startup-visibility)
+    (goto-char (point-min)))
+  (pop-to-buffer buffer))
+
+(defun ki-studio-view-refresh ()
+  "Read this view again."
+  (interactive)
+  (if ki-studio--view-refresh
+      (funcall ki-studio--view-refresh)
+    (user-error "Nothing to read again here")))
+
+(declare-function denote "denote")
+(declare-function org-export-string-as "ox")
+(declare-function org-export-define-derived-backend "ox")
+(declare-function org-export-table-dimensions "ox")
+(declare-function org-export-get-parent-table "ox")
+
+;; ox-md writes tables as HTML; a note wants Markdown pipe tables
+(defun ki-studio--md-table (_table contents _info)
+  "A table: its rows."
+  contents)
+
+(defun ki-studio--md-table-row (row contents info)
+  "ROW as a pipe table row; a rule becomes the header separator."
+  (if (eq (org-element-property :type row) 'rule)
+      (let ((columns (cdr (org-export-table-dimensions (org-export-get-parent-table row) info))))
+        (concat "|" (mapconcat #'identity (make-list columns "---") "|") "|\n"))
+    (concat "|" contents "\n")))
+
+(defun ki-studio--md-table-cell (_cell contents _info)
+  "A cell of a pipe table."
+  (concat " " (or contents "") " |"))
+
+(with-eval-after-load 'ox-md
+  (org-export-define-derived-backend 'ki-studio-md 'md
+    :translate-alist '((table . ki-studio--md-table)
+                       (table-row . ki-studio--md-table-row)
+                       (table-cell . ki-studio--md-table-cell))))
+
+(defun ki-studio-view-save-note ()
+  "Save this view as a Denote note, in Markdown like the rest of the vault.
+For the record of a run: the issue changes as soon as it is reactivated."
+  (interactive)
+  (require 'denote)
+  (require 'ox-md)
+  (let* ((title (or (cadar (org-collect-keywords '("TITLE"))) (buffer-name)))
+         (body (org-export-string-as
+                (buffer-substring-no-properties (point-min) (point-max)) 'ki-studio-md t
+                ;; keep ... and -- as typed, not &hellip; and &ndash;
+                '(:with-toc nil :with-title nil :with-special-strings nil))))
+    (denote title '("ki" "issue") 'markdown-yaml)
+    (goto-char (point-max))
+    (insert "\n" body)
+    (save-buffer)
+    (message "Saved as %s" (file-name-nondirectory buffer-file-name))))
+
+(defun ki-studio--in-root (fn)
+  "Call FN where Studio finds its checkout, also from outside one."
+  (if (ki-studio--root)
+      (funcall fn)
+    (with-temp-buffer
+      (setq default-directory (or ki-studio--last-root
+                                  (user-error "Open a KI in the dlr_core checkout first")))
+      (funcall fn))))
+
+(defun ki-studio-show-jd (id)
+  "Focus the job description ID and show it."
+  (let ((name (alist-get 'ogit/name (car (ki-studio--jd id)))))
+    (puthash (ki-studio--root) (cons id name) ki-studio--jd-by-root)
+    (ki-studio-av)))
+
+(defun ki-studio--export-id-link (id description _backend &rest _)
+  "A Studio link outside Emacs: its DESCRIPTION and the ID to look it up."
+  (if (equal (string-replace "\\" "" description) id)
+      (format "`%s`" id)
+    (format "%s (`%s`)" description id)))
+
+(with-eval-after-load 'ol
+  (org-link-set-parameters
+   "ki-issue" :follow (lambda (id _) (ki-studio--in-root (lambda () (ki-studio-issue id))))
+   :export #'ki-studio--export-id-link)
+  (org-link-set-parameters
+   "ki-jd" :follow (lambda (id _) (ki-studio--in-root (lambda () (ki-studio-show-jd id))))
+   :export #'ki-studio--export-id-link))
+
+
+;;; The issue view
+
+(defun ki-studio--org-halt (env fired lines open files)
+  "Org text: where a run that has not resolved stands.
 FIRED and LINES are the fired KIs and justification lines of the issue,
 OPEN its open ToDos; the KIs waiting on each are where to look for the
-rule that did not fire.  FILES and ROOT as in `ki-studio--insert-ki'."
-  (ki-studio--section "Halt")
+rule that did not fire.  FILES maps KI names to files."
   (let* ((names (mapcar (lambda (f) (ki-studio--ki-name env (nth 2 f))) fired))
          ;; the idle stop only says that nothing else fired any more
          (idle (equal (car (last names)) "Auto Idle"))
          (last-rule (car (last (if idle (butlast names) names)))))
-    (cond ((null fired))
-          ((null (caar fired))
-           (insert "  zuletzt gefeuert  (unbekannt: keine Reihenfolge gelesen)\n"))
-          (t (when idle
-               (insert "  gestoppt durch    Auto Idle: danach feuerte nichts mehr\n"))
-             (when last-rule
-               (insert "  zuletzt gefeuert  ")
-               (ki-studio--insert-ki last-rule files root)
-               (insert "\n")))))
-  (when lines
-    (insert "  letzte Zeile      "
-            (string-trim (car (split-string (car (last lines)) "|"))) "\n"))
-  ;; ProcessIssue is the global trigger every rule waits on, not a step
-  (dolist (todo (remove "ProcessIssue" open))
-    (let ((waiting (ki-studio--waiting-on todo)))
-      (insert (format "  %s offen, %d KIs warten darauf\n" todo (length waiting)))
-      (dolist (file (seq-take waiting 15))
-        (insert "    ")
-        (insert-text-button (file-name-base file) 'action (lambda (_) (find-file file))
-                            'help-echo (file-relative-name file root))
-        (insert "\n"))
-      (when (> (length waiting) 15)
-        (insert (format "    … %d weitere (M-? auf %s)\n" (- (length waiting) 15) todo))))))
+    (concat
+     "* Halt\n"
+     (cond ((null fired) "")
+           ((null (caar fired))
+            "- Zuletzt gefeuert :: unbekannt, keine Reihenfolge gelesen\n")
+           (t (concat (and idle "- Gestoppt durch :: Auto Idle, danach feuerte nichts mehr\n")
+                      (and last-rule (format "- Zuletzt gefeuert :: %s\n"
+                                             (ki-studio--org-ki last-rule files))))))
+     (and lines (format "- Letzte Zeile :: %s\n"
+                        (ki-studio--org-text (car (split-string (car (last lines)) "|")))))
+     ;; ProcessIssue is the global trigger every rule waits on, not a step
+     (mapconcat
+      (lambda (todo)
+        (let ((waiting (ki-studio--waiting-on todo)))
+          (concat (format "- %s offen :: %d KIs warten darauf\n" todo (length waiting))
+                  (mapconcat (lambda (file)
+                               (format "  - %s\n" (ki-studio--org-link
+                                                   (concat "file:" file) (file-name-base file))))
+                             (seq-take waiting 15) "")
+                  (and (> (length waiting) 15)
+                       (format "  - … %d weitere (M-? auf %s)\n" (- (length waiting) 15) todo)))))
+      (remove "ProcessIssue" open) ""))))
+
+(defun ki-studio--issue-org (env issue fired files todos)
+  "The org text of the view of ISSUE in ENV.
+FIRED are its fired KIs, FILES maps KI names to files, TODOS are the
+agenda ToDos."
+  (let* ((id (alist-get 'ogit/_id issue))
+         (status (format "%s" (alist-get 'ogit/status issue)))
+         (jd-id (alist-get 'ogit/Automation/originNode issue))
+         (jd-name (or (alist-get '/stelle issue) "?"))
+         (open (seq-filter (lambda (todo) (alist-get (intern (concat "/" todo)) issue)) todos))
+         (question (alist-get '/KlaereRueckfrage issue))
+         (lines (ki-studio--json-list (alist-get '/begruendung issue)))
+         (hints (ki-studio--json-list (alist-get '/hinweise issue)))
+         (variables (sort (seq-filter (lambda (kv) (string-prefix-p "/" (symbol-name (car kv))))
+                                      issue)
+                          (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b))))))
+         (t0 (cadr (car fired))))
+    (concat
+     ;; ^:nil: the underscores in ids are not subscripts
+     (format "#+title: Issue %s %s, %s\n#+startup: showall\n#+options: ^:nil\n\n"
+             (substring id -8) (ki-studio--org-text jd-name) status)
+     "* Überblick\n"
+     (format "- Status :: %s\n" status)
+     (format "- Stelle :: %s\n" (if jd-id (ki-studio--org-link (concat "ki-jd:" jd-id)
+                                                                (ki-studio--org-text jd-name))
+                                  jd-name))
+     (format "- Lauf :: %s → %s, v%s\n"
+             (ki-studio--date (alist-get 'ogit/_created-on issue))
+             (ki-studio--date (alist-get 'ogit/_modified-on issue))
+             (alist-get 'ogit/_v issue))
+     (format "- Ergebnis :: %s / %s\n"
+             (or (alist-get '/zielEntgeltgruppe issue) "-")
+             (or (alist-get '/zielFallgruppe issue) "-"))
+     (format "- Offen :: %s\n" (if open (string-join open ", ") "-"))
+     (and question (format "- Rückfrage :: %s\n" (ki-studio--org-text question)))
+     (format "- Issue :: %s\n" (ki-studio--org-link (concat "ki-issue:" id) id))
+     (unless (member status '("RESOLVED" "RESOLVED_EXTERNAL"))
+       (ki-studio--org-halt env fired lines open files))
+     (format "* Begründung (%d)\n" (length lines))
+     (and lines
+          (concat (ki-studio--org-row "Ergebnis" "Merkmal" "Stufe" "Anteil" "Beleg" "Quelle" "Satz")
+                  "|-\n"
+                  (mapconcat (lambda (line)
+                               (let ((parts (split-string line "|")))
+                                 (ki-studio--org-row
+                                  (ki-studio--org-text (nth 3 parts))
+                                  (ki-studio--org-text (nth 2 parts))
+                                  (ki-studio--org-text (nth 1 parts))
+                                  (ki-studio--org-text (nth 5 parts))
+                                  (ki-studio--org-text (nth 6 parts) 50)
+                                  (ki-studio--org-text (nth 7 parts) 40)
+                                  (ki-studio--org-text (car parts)))))
+                             lines "")))
+     (when hints
+       (concat (ki-studio--org-folded (format "Hinweise (%d)" (length hints)))
+               (mapconcat (lambda (line)
+                            (format "- %s\n" (ki-studio--org-text (car (split-string line "|")))))
+                          hints "")))
+     (ki-studio--org-folded
+      (format "Gefeuert (%d%s)" (length fired)
+              (if (and fired (null (caar fired))) ", ohne Reihenfolge" "")))
+     (and fired
+          (concat (ki-studio--org-row "#" "ms" "KI")
+                  "|-\n"
+                  (mapconcat (pcase-lambda (`(,count ,millis ,ki ,_node))
+                               (ki-studio--org-row
+                                (format "%s" (or count "-"))
+                                (if (and millis t0) (format "%d" (- millis t0)) "")
+                                (ki-studio--org-ki (ki-studio--ki-name env ki) files)))
+                             fired "")))
+     (ki-studio--org-folded (format "Variablen (%d)" (length variables)))
+     (ki-studio--org-row "Variable" "Wert")
+     "|-\n"
+     (mapconcat (lambda (kv)
+                  (ki-studio--org-row (substring (symbol-name (car kv)) 1)
+                                      (ki-studio--org-text (cdr kv) 150)))
+                variables ""))))
 
 (defun ki-studio-issue (id)
-  "Show the issue ID: status, result, open ToDos, lines and fired KIs."
+  "Show the issue ID in org: status, result, where it stopped, the
+justification lines, the fired KIs and all variables."
   (interactive (list (string-trim (read-string "Issue id: " nil 'ki-studio--issue-history
                                                (car ki-studio--issue-history)))))
   (let* ((env (ki-studio--env))
@@ -860,81 +1087,11 @@ rule that did not fire.  FILES and ROOT as in `ki-studio--insert-ki'."
          (issue (ki-studio--reading "Reading the issue" (ki-hiro-get env id)))
          (fired (ki-studio--reading "Reading the fired KIs" (ki-studio--fired env issue)))
          (files (ki-studio--files-by-name))
-         (todos (cons "ProcessIssue" (mapcar #'cdr (ki-studio--todo-map))))
-         (buffer (get-buffer-create (format "*ki issue: …%s*" (substring id -8)))))
-    (with-current-buffer buffer
-      (ki-studio-issue-mode)
-      (setq ki-studio--issue-id id
-            default-directory root)
-      (let ((inhibit-read-only t)
-            (status (alist-get 'ogit/status issue)))
-        (erase-buffer)
-        (insert (propertize (format "Issue %s\n" id) 'face 'bold)
-                (format "Status   %s\n" (propertize (format "%s" status) 'face
-                                                    (pcase status
-                                                      ("RESOLVED" 'success)
-                                                      ((or "STOPPED" "WAITING") 'warning)
-                                                      (_ 'default))))
-                "Stelle   ")
-        (let ((jd-id (alist-get 'ogit/Automation/originNode issue))
-              (jd-name (or (alist-get '/stelle issue) "?")))
-          (insert-text-button jd-name
-                              'action (lambda (_)
-                                        (ki-studio-select-jd jd-id jd-name)
-                                        (ki-studio-av))
-                              'help-echo "Focus this job description and show it")
-          (insert (format "  (%s)\n" jd-id)))
-        (insert (format "Lauf     %s -> %s, v%s\n"
-                        (ki-studio--date (alist-get 'ogit/_created-on issue))
-                        (ki-studio--date (alist-get 'ogit/_modified-on issue))
-                        (alist-get 'ogit/_v issue))
-                (format "Ergebnis %s / %s\n"
-                        (or (alist-get '/zielEntgeltgruppe issue) "-")
-                        (or (alist-get '/zielFallgruppe issue) "-")))
-        (let ((open (seq-filter (lambda (todo) (alist-get (intern (concat "/" todo)) issue)) todos))
-              (question (alist-get '/KlaereRueckfrage issue))
-              (lines (ki-studio--json-list (alist-get '/begruendung issue))))
-          (insert (format "Offen    %s\n" (if open (string-join open ", ") "-")))
-          (when question
-            (insert (propertize (format "Rueckfrage %s\n" question) 'face 'warning)))
-          (unless (member status '("RESOLVED" "RESOLVED_EXTERNAL"))
-            (ki-studio--insert-halt env fired lines open files root)))
-        (ki-studio--section "Begruendung")
-        (dolist (line (ki-studio--json-list (alist-get '/begruendung issue)))
-          (let ((parts (mapcar #'string-trim (split-string line "|"))))
-            (insert (format "  %-14s %-22s %s\n"
-                            (propertize (or (nth 3 parts) "?") 'face
-                                        (pcase (nth 3 parts)
-                                          ("erfuellt" 'success)
-                                          ("nicht_erfuellt" 'error)
-                                          (_ 'shadow)))
-                            (truncate-string-to-width (or (nth 2 parts) "") 22)
-                            (or (car parts) line)))))
-        (when-let* ((hints (ki-studio--json-list (alist-get '/hinweise issue))))
-          (ki-studio--section "Hinweise")
-          (dolist (line hints)
-            (insert "  " (car (split-string line "|")) "\n")))
-        (ki-studio--section
-         (format "Gefeuert (%d%s)" (length fired)
-                 (if (and fired (null (caar fired))) ", OHNE Reihenfolge" "")))
-        (let ((t0 (cadr (car fired))))
-          (pcase-dolist (`(,count ,millis ,ki ,_node) fired)
-            (insert (format "  %4s %7s  " (or count "-")
-                            (if (and millis t0) (format "%dms" (- millis t0)) "")))
-            (ki-studio--insert-ki (ki-studio--ki-name env ki) files root)
-            (insert "\n")))
-        (ki-studio--section "Variablen")
-        (dolist (kv (sort (seq-filter (lambda (kv) (string-prefix-p "/" (symbol-name (car kv)))) issue)
-                          (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b))))))
-          (insert (format "  %-36s %s\n" (substring (symbol-name (car kv)) 1)
-                          (truncate-string-to-width (format "%s" (cdr kv)) 120 nil nil "…"))))
-        (goto-char (point-min))))
-    (pop-to-buffer buffer)))
-
-(defun ki-studio-issue-refresh ()
-  "Read this issue again."
-  (interactive)
-  (ki-studio-issue ki-studio--issue-id))
+         (todos (cons "ProcessIssue" (mapcar #'cdr (ki-studio--todo-map)))))
+    (ki-studio--show-org (get-buffer-create (format "*ki issue: …%s*" (substring id -8)))
+                         (ki-studio--issue-org env issue fired files todos)
+                         (lambda () (ki-studio-issue id))
+                         root)))
 
 (defvar-keymap ki-studio-issues-mode-map
   :doc "Keymap for `ki-studio-issues-mode'."
@@ -1001,8 +1158,10 @@ JD, an (ID . NAME), overrides the focused one.  RET reads one."
     (kbd "RET") #'ki-studio-issues-open
     (kbd "gr") #'ki-studio-issues-refresh
     (kbd "q") #'quit-window)
-  (evil-define-key* 'normal ki-studio-issue-mode-map
-    (kbd "gr") #'ki-studio-issue-refresh
+  ;; s and q are evil commands in normal state; gs for saving instead
+  (evil-define-key* 'normal ki-studio-view-mode-map
+    (kbd "gr") #'ki-studio-view-refresh
+    (kbd "gs") #'ki-studio-view-save-note
     (kbd "q") #'quit-window)
   (evil-define-key* 'normal ki-studio-av-mode-map
     (kbd "gr") #'ki-studio-av-refresh
