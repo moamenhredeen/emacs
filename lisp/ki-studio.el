@@ -13,9 +13,18 @@
 ;; the ki-bauen skill of the dlr-teaching plugin:
 ;;
 ;; - lints: the justification line in 8 parts, its key and result, the
-;;   header, the folder's agenda ToDo, and what an own KI must not carry
+;;   header, and what an own KI must not carry
 ;; - eldoc: which part of a begruendung/hinweise line point is in
 ;; - `ki-studio-new-ki': a new KI in a section folder, from the skeleton
+;;
+;; The commands that read HIRO live in ki-studio-remote.el and load on
+;; first use:
+;;
+;;   C-c C-c  check with the engine, and find unregistered variables
+;;   C-c C-d  diff with the deployed KI     C-c C-p  pull it
+;;   C-c C-e  choose the environment        C-c C-j  focus a job description
+;;   C-c C-a  its WorkUnits with av*        C-c C-t  test the on part on it
+;;   C-c C-i  read an issue                 C-c C-l  its issues
 
 ;;; Code:
 
@@ -289,24 +298,77 @@ the justification line."
     (search-forward "description: \"")))
 
 
+;;; Results of the last check
+
+(defvar-local ki-studio--check-diags nil
+  "Diagnostics of the last `ki-studio-check', as (WHERE TYPE MESSAGE).
+WHERE is a line number or a variable name.")
+
+(defun ki-studio-lint-check (occs)
+  "The diagnostics of the last `ki-studio-check', placed in the buffer."
+  (let (diags)
+    (pcase-dolist (`(,where ,type ,message) ki-studio--check-diags)
+      (if (integerp where)
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line (1- where))
+            (push (list (line-beginning-position) (line-end-position) type message) diags))
+        (dolist (occ occs)
+          (when (equal (ki-occ-name occ) where)
+            (push (list (ki-occ-beg occ) (ki-occ-end occ) type message) diags)))))
+    diags))
+
+
 ;;; Mode
+
+;; the commands that read HIRO load on first use
+(autoload 'ki-studio-check "ki-studio-remote" nil t)
+(autoload 'ki-studio-diff "ki-studio-remote" nil t)
+(autoload 'ki-studio-pull "ki-studio-remote" nil t)
+(autoload 'ki-studio-select-env "ki-studio-remote" nil t)
+(autoload 'ki-studio-select-jd "ki-studio-remote" nil t)
+(autoload 'ki-studio-av "ki-studio-remote" nil t)
+(autoload 'ki-studio-test-on "ki-studio-remote" nil t)
+(autoload 'ki-studio-issue "ki-studio-remote" nil t)
+(autoload 'ki-studio-issues "ki-studio-remote" nil t)
+(declare-function ki-studio--env-label "ki-studio-remote")
 
 (defvar-keymap ki-studio-mode-map
   :doc "Keymap for `ki-studio-mode'."
-  "C-c C-n" #'ki-studio-new-ki)
+  "C-c C-n" #'ki-studio-new-ki
+  "C-c C-c" #'ki-studio-check
+  "C-c C-d" #'ki-studio-diff
+  "C-c C-p" #'ki-studio-pull
+  "C-c C-e" #'ki-studio-select-env
+  "C-c C-j" #'ki-studio-select-jd
+  "C-c C-a" #'ki-studio-av
+  "C-c C-t" #'ki-studio-test-on
+  "C-c C-i" #'ki-studio-issue
+  "C-c C-l" #'ki-studio-issues)
+
+(defun ki-studio--lighter ()
+  "Mode line text: Studio and the environment, once one is chosen."
+  (if-let* (((featurep 'ki-studio-remote))
+            (label (ki-studio--env-label)))
+      (concat " Studio[" label "]")
+    " Studio"))
+
+(defconst ki-studio--lints
+  '(ki-studio-lint-lines ki-studio-lint-header ki-studio-lint-own-ki
+    ki-studio-lint-check))
 
 ;;;###autoload
 (define-minor-mode ki-studio-mode
-  "DLR conventions for KI files in a dlr_core checkout."
-  :lighter " Studio"
+  "DLR conventions for KI files in a dlr_core checkout.
+
+\\{ki-studio-mode-map}"
+  :lighter (:eval (ki-studio--lighter))
   (if ki-studio-mode
       (progn
-        (dolist (fn '(ki-studio-lint-lines ki-studio-lint-header
-                      ki-studio-lint-own-ki))
+        (dolist (fn ki-studio--lints)
           (add-hook 'ki-lint-functions fn t t))
         (add-hook 'eldoc-documentation-functions #'ki-studio-eldoc nil t))
-    (dolist (fn '(ki-studio-lint-lines ki-studio-lint-header
-                  ki-studio-lint-own-ki))
+    (dolist (fn ki-studio--lints)
       (remove-hook 'ki-lint-functions fn t))
     (remove-hook 'eldoc-documentation-functions #'ki-studio-eldoc t)))
 

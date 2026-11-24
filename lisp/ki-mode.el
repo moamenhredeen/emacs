@@ -740,5 +740,10 @@ matches the whole word, so only a class without one is reported."
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.ki\\'" . ki-mode))
 
+;; KIs carry umlauts in UTF-8, and the deployed text must match byte for
+;; byte; never let a system default decode them
+;;;###autoload
+(add-to-list 'auto-coding-alist '("\\.ki\\'" . utf-8))
+
 (provide 'ki-mode)
 ;;; ki-mode.el ends here
