@@ -116,7 +116,7 @@ and USERPROFILE environment variable on windows."
 (add-hook 'emacs-lisp-mode-hook 'my/enable-tabs)
 
 ;; disable line nubmer hooks
-;; (global-display-line-numbers-mode 0)
+(global-display-line-numbers-mode 0)
 ;; (defun my/disable-line-numbers ()
 ;;   (display-line-numbers-mode 0))
 ;; (add-hook 'shell-mode-hook 'my/disable-line-numbers)
@@ -441,32 +441,106 @@ and USERPROFILE environment variable on windows."
 (with-eval-after-load 'project
   (add-hook 'project-find-functions #'my/maven-project-finder))
 
-(use-package eglot
+;; (use-package eglot
+;;   :ensure t
+;;   :hook ((go-ts-mode
+;;           rust-mode
+;;           typescript-ts-mode
+;;           tsx-ts-mode
+;;           powershell-mode
+;;           nxml-mode
+;;           js-ts-mode
+;;           go-ts-mode
+;;           dart-mode
+;;           latex-mode
+;;           java-mode
+;;           java-ts-mode)
+;; 		 . eglot-ensure)
+;;   :config
+;;   ;; bromo — the in-development Java LSP.
+;;   ;; Build:  cd ~/git-repos/bromo && ./mvnw -DskipTests package
+;;   ;; Reload after rebuild: M-x eglot-reconnect
+;;   (add-to-list 'eglot-server-programs
+;;                '((java-mode java-ts-mode)
+;;                  . ("C:/Users/mhraden/.jdks/temurin-25.0.3/bin/java.exe"
+;;                     "--enable-preview" "-XX:+UseZGC"
+;;                     "-jar" "C:/Users/mhraden/git-repos/bromo/target/bromo.jar"
+;;                     "--stdio"))))
+
+;; these grammars came from a bundle without the libtree-sitter- prefix that
+;; emacs looks for, so map the language to the actual dll name
+(when (treesit-available-p)
+  (dolist (lang '(elixir heex))
+    (add-to-list 'treesit-load-name-override-list
+                 (list lang (symbol-name lang) (format "tree_sitter_%s" lang)))))
+
+;; language servers send large JSON payloads; the default read chunk is too small
+(setq read-process-output-max (* 1024 1024))
+
+;; fringes are disabled, so show flymake diagnostics in the margin instead
+(setq flymake-indicator-type 'margins)
+
+(use-package lsp-mode
   :ensure t
-  :hook ((go-ts-mode
-          rust-mode
-          typescript-ts-mode
-          tsx-ts-mode
-          powershell-mode
-          nxml-mode
-          js-ts-mode
-          go-ts-mode
-          dart-mode
-          latex-mode
-          java-mode
-          java-ts-mode)
-		 . eglot-ensure)
+  :commands (lsp lsp-deferred)
+  :mode (("\\.exs?\\'" . elixir-ts-mode)
+         ("\\.heex\\'" . heex-ts-mode))
+  :hook (((elixir-ts-mode
+           heex-ts-mode
+           go-ts-mode
+           rust-mode
+           typescript-ts-mode
+           tsx-ts-mode
+           js-ts-mode
+           java-mode
+           java-ts-mode
+           powershell-mode
+           nxml-mode
+           latex-mode)
+          . lsp-deferred)
+         (lsp-mode . lsp-enable-which-key-integration)
+         (lsp-completion-mode . my/lsp-mode-setup-completion))
+  :init
+  ;; must be set before lsp-mode loads; the default s-l is Win+L on windows
+  (setq lsp-keymap-prefix "C-c l")
+  ;; let corfu + orderless filter lsp candidates
+  (defun my/lsp-mode-setup-completion ()
+    (setf (alist-get 'styles (alist-get 'lsp-capf completion-category-defaults))
+          '(orderless)))
+  :custom
+  (lsp-completion-provider :none)        ; corfu is the completion UI
+  (lsp-enable-snippet nil)               ; yasnippet is not installed
+  (lsp-headerline-breadcrumb-enable nil)
+  (lsp-lens-enable nil)
+  (lsp-log-io nil)
+  (lsp-elixir-local-server-command
+   (expand-file-name "~/tools/elixir-ls-v0.31.1/language_server.bat"))
   :config
+  ;; evil-collection has no lsp-mode module; mirror what its eglot module
+  ;; bound, otherwise K falls back to man pages and gd to a text search
+  (add-hook 'lsp-mode-hook #'evil-normalize-keymaps)
+  (general-define-key
+   :states		'normal
+   :keymaps		'lsp-mode-map
+   "gd"			'xref-find-definitions
+   "gD"			'xref-find-definitions-other-window
+   "g5"			'xref-find-definitions-other-frame
+   "gr"			'xref-find-references
+   "C-t"		'xref-go-back
+   "K"			'lsp-describe-thing-at-point)
+
   ;; bromo — the in-development Java LSP.
   ;; Build:  cd ~/git-repos/bromo && ./mvnw -DskipTests package
-  ;; Reload after rebuild: M-x eglot-reconnect
-  (add-to-list 'eglot-server-programs
-               '((java-mode java-ts-mode)
-                 . ("C:/Users/mhraden/.jdks/temurin-25.0.3/bin/java.exe"
-                    "--enable-preview" "-XX:+UseZGC"
-                    "-jar" "C:/Users/mhraden/git-repos/bromo/target/bromo.jar"
-                    "--stdio"))))
-
+  ;; Reload after rebuild: M-x lsp-workspace-restart
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-stdio-connection
+                     '("C:/Users/mhraden/.jdks/temurin-25.0.3/bin/java.exe"
+                       "--enable-preview" "-XX:+UseZGC"
+                       "-jar" "C:/Users/mhraden/git-repos/bromo/target/bromo.jar"
+                       "--stdio"))
+    :activation-fn (lsp-activate-on "java")
+    :server-id 'bromo)))
 
 ;; ***********************************************************************
 ;; ***
@@ -547,7 +621,7 @@ and USERPROFILE environment variable on windows."
   (general-define-key
    :states		'(normal visual)
     "g c"		'evilnc-comment-or-uncomment-lines
-    "g i"		'eglot-find-implementation)
+    "g i"		'lsp-find-implementation)
 
   (general-define-key
    :states		'normal
@@ -575,10 +649,10 @@ and USERPROFILE environment variable on windows."
     "c"       'my/open-init-file
     "e"       'dired-jump
 
-    ;; eglot
-    "a"     'eglot-code-actions
-    "rr"     'eglot-rename
-    "rf"     'eglot-format
+    ;; lsp
+    "a"     'lsp-execute-code-action
+    "rr"     'lsp-rename
+    "rf"     'lsp-format-buffer
 
 
     ;; search
@@ -1045,14 +1119,15 @@ Returns non-nil when it handled URL, which stops
  '(git-gutter:deleted-sign " ")
  '(git-gutter:modified-sign " ")
  '(package-selected-packages
-   '(acp consult-denote consult-projectile corfu dap-mode dart-mode
-		 dired-subtree emacsql embark-consult evil-collection
-		 evil-multiedit evil-nerd-commenter evil-org evil-surround
-		 general git-gutter gnu-elpa-keyring-update hackernews
-		 kdl-mode kotlin-mode log4j-mode lua-mode magit marginalia
-		 markdown-mode modus-themes olivetti orderless org-journal
-		 org-modern org-pdftools plantuml-mode powershell restclient
-		 shell-maker spinner treemacs vertico web-mode yaml)))
+   '(acp consult-denote consult-projectile corfu csv-mode dap-mode
+		 dart-mode dired-subtree emacsql embark-consult
+		 evil-collection evil-multiedit evil-nerd-commenter evil-org
+		 evil-surround general git-gutter gnu-elpa-keyring-update
+		 hackernews jupyter kdl-mode kotlin-mode log4j-mode lsp-mode
+		 lua-mode magit marginalia markdown-mode modus-themes olivetti
+		 orderless org-journal org-modern org-pdftools plantuml-mode
+		 powershell restclient rustic shell-maker spinner treemacs
+		 vertico web-mode yaml)))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.

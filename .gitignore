@@ -16,3 +16,6 @@ recentf
 tree-sitter/
 server/
 url/
+.lsp-session-v1
+.cache/
+tramp

@@ -7,7 +7,11 @@
 ;; Minimize garbage collection during startup, restore a sane value after
 (setq gc-cons-threshold most-positive-fixnum)
 (add-hook 'emacs-startup-hook
-          (lambda () (setq gc-cons-threshold (* 20 1000 1000))))
+          (lambda () (setq gc-cons-threshold (* 100 1000 1000))))
+
+;; lsp-mode: deserialize JSON into plists (faster). Must be set before
+;; lsp-mode is compiled, so reinstall lsp-mode after changing this.
+(setenv "LSP_USE_PLISTS" "true")
 
 ;; Skip file-name handlers during startup (TRAMP, archives, etc.)
 (defvar my/file-name-handler-alist file-name-handler-alist)
@@ -77,12 +81,3 @@
 
 ;; remove window fringes
 (fringe-mode 0)
-
-(setq initial-scratch-message "
-;;  ███████╗███╗   ███╗ █████╗  ██████╗███████╗
-;;  ██╔════╝████╗ ████║██╔══██╗██╔════╝██╔════╝
-;;  █████╗  ██╔████╔██║███████║██║     ███████╗
-;;  ██╔══╝  ██║╚██╔╝██║██╔══██║██║     ╚════██║
-;;  ███████╗██║ ╚═╝ ██║██║  ██║╚██████╗███████║
-;;  ╚══════╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
-")
