@@ -757,7 +757,7 @@ and USERPROFILE environment variable on windows."
           (5 . (rainbow bold 1.05))
           (6 . (rainbow bold 1.0))))
   :config
-  (load-theme 'modus-vivendi-tritanopia t))
+  (load-theme 'modus-vivendi-deuteranopia t))
 
 ;; ***********************************************************************
 ;; ***
@@ -1144,8 +1144,8 @@ Returns non-nil when it handled URL, which stops
  '(git-gutter:deleted-sign " ")
  '(git-gutter:modified-sign " ")
  '(package-selected-packages
-   '(acp consult-denote consult-projectile corfu csv-mode dap-mode
-		 dart-mode dired-subtree emacsql embark-consult
+   '(acp agent-shell consult-denote consult-projectile corfu csv-mode
+		 dap-mode dart-mode dired-subtree emacsql embark-consult
 		 evil-collection evil-multiedit evil-nerd-commenter evil-org
 		 evil-surround general git-gutter gnu-elpa-keyring-update
 		 hackernews jupyter kdl-mode kotlin-mode log4j-mode lsp-mode
