@@ -425,6 +425,18 @@ and USERPROFILE environment variable on windows."
   :custom
   (typescript-ts-mode-indent-offset 2))
 
+;; HIRO Knowledge Items (.ki); the mode lives in lisp/ki-mode.el.
+;; my/enable-tabs (prog-mode-hook) turns on tabs and rebinds TAB to
+;; tab-to-tab-stop; KI files use spaces and need TAB to indent.
+(defun my/ki-mode-setup ()
+  (setq indent-tabs-mode nil)
+  (local-set-key (kbd "TAB") #'indent-for-tab-command))
+
+(use-package ki-mode
+  :load-path "lisp"
+  :mode "\\.ki\\'"
+  :hook (ki-mode . my/ki-mode-setup))
+
 ;; lit-html template literal highlighting (optional but nice for Lit)
 (use-package mhtml-mode
   :defer t)
