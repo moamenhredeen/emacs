@@ -414,27 +414,6 @@ enrichment can change the WorkUnits mid-round."
                  collect (cons (substring name 1) value))
         (lambda (a b) (string< (car a) (car b)))))
 
-(defvar ki-studio-av-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map "g" #'ki-studio-av-refresh)
-    map))
-
-(define-derived-mode ki-studio-av-mode special-mode "KI-Stelle"
-  "A job description: its text, qualifications, authorities and WorkUnits."
-  (setq truncate-lines nil)
-  (visual-line-mode 1))
-
-(defvar-local ki-studio--av-jd nil "JD id this buffer shows.")
-
-(defun ki-studio--insert-field (label value)
-  "Insert LABEL and VALUE, the value wrapped under its own indentation."
-  (when (and value (not (equal value "")))
-    ;; continuation lines, wrapped or real, start under the value
-    (let ((prefix (make-string (+ 4 (max 13 (length label))) ?\s)))
-      (insert (propertize (format "   %-13s " label) 'face 'font-lock-variable-name-face)
-              (propertize (format "%s" value) 'wrap-prefix prefix 'line-prefix prefix)
-              "\n"))))
-
 (defun ki-studio--free-attributes (vertex)
   "The free attributes of VERTEX (stored with a leading slash), sorted.
 The av* ones are left out; they have their own lines."
@@ -444,65 +423,76 @@ The av* ones are left out; they have their own lines."
                  collect (cons (substring name 1) value))
         (lambda (a b) (string< (car a) (car b)))))
 
+(defun ki-studio--org-item (label value)
+  "An org description item LABEL :: VALUE, VALUE exactly as it is.
+Rules match these texts with regexes, so nothing is replaced: further
+lines are indented into the item, which also keeps a `*' at the start
+of a line from becoming a heading.  Empty values give no item."
+  (let ((text (string-trim-right (replace-regexp-in-string "\r" "" (format "%s" (or value ""))))))
+    (unless (string-empty-p text)
+      (format "- %s :: %s\n" label (string-replace "\n" "\n  " text)))))
+
+(defun ki-studio--jd-org (jd-id jd workunits qualifications authorities)
+  "The org text of the job description JD-ID: everything a rule reads on it."
+  (concat
+   (format "#+title: Stelle %s\n#+startup: showall\n#+options: ^:nil\n\n"
+           (ki-studio--org-text (alist-get 'ogit/name jd)))
+   "* Überblick\n"
+   (format "- Stelle :: %s\n" (ki-studio--org-link (concat "ki-jd:" jd-id)
+                                                   (ki-studio--org-text (alist-get 'ogit/name jd))))
+   (format "- Id :: %s\n" jd-id)
+   (format "- Fassung :: %s, %d Qualifikationen, %d Befugnisse\n"
+           (substring-no-properties (ki-studio--import-flag (ki-studio--wu-counts workunits)))
+           (length qualifications) (length authorities))
+   (format "- Angelegt :: %s, v%s\n" (ki-studio--date (alist-get 'ogit/_created-on jd))
+           (alist-get 'ogit/_v jd))
+   "* Stelle\n"
+   (ki-studio--org-item "description" (alist-get 'ogit/description jd))
+   (ki-studio--org-item "content" (alist-get 'ogit/content jd))
+   (mapconcat (pcase-lambda (`(,name . ,value)) (ki-studio--org-item name value))
+              (ki-studio--free-attributes jd) "")
+   (format "* Qualifikationen (%d, ogit/requires)\n" (length qualifications))
+   (mapconcat (lambda (q) (ki-studio--org-item (or (alist-get 'ogit/HR/qualificationKind q) "-")
+                                               (alist-get 'ogit/description q)))
+              qualifications "")
+   (when authorities
+     (concat (format "* Befugnisse (%d, ogit/defines)\n" (length authorities))
+             (mapconcat (lambda (a) (ki-studio--org-item "Authority"
+                                                         (or (alist-get 'ogit/description a)
+                                                             (alist-get 'ogit/name a))))
+                        authorities "")))
+   (format "* WorkUnits (%d)\n" (length workunits))
+   (mapconcat
+    (lambda (wu)
+      (let ((av (ki-studio--av-attributes wu)))
+        (concat
+         (format "** %s\n" (ki-studio--org-text (alist-get 'ogit/name wu)))
+         (format "- Id :: %s\n" (alist-get 'ogit/_id wu))
+         (format "- Anteil :: %s, v%s\n" (alist-get 'ogit/HR/timeShare wu) (alist-get 'ogit/_v wu))
+         (ki-studio--org-item "values" (alist-get 'ogit/values wu))
+         (if av
+             (mapconcat (pcase-lambda (`(,name . ,value)) (ki-studio--org-item name value)) av "")
+           "- av* :: keine\n"))))
+    workunits "")))
+
 (defun ki-studio-av (&optional refresh jd-id)
-  "Show the focused job description: everything a rule can read on it.
+  "Show the focused job description in org: everything a rule can read on it.
 Its text and free attributes, its qualification requirements and
-authorities, and each WorkUnit with its activity text and av* values.
-With REFRESH (prefix argument), read it again.  JD-ID overrides the
-focused one."
+authorities, and each WorkUnit with its activity text and av* values,
+all exactly as stored.  With REFRESH (prefix argument), read it again.
+JD-ID overrides the focused one."
   (interactive "P")
   (let* ((jd-id (or jd-id (car (ki-studio--jd-or-ask))))
          (root (ki-studio--root))
          (pair (ki-studio--jd jd-id refresh))
-         (jd (car pair))
-         (related (gethash jd-id ki-studio--jd-related))
-         (qualifications (cdr (assoc "ogit/HR/QualificationRequirement" related)))
-         (authorities (cdr (assoc "ogit/HR/Authority" related)))
-         (buffer (get-buffer-create (format "*ki stelle: %s*" (alist-get 'ogit/name jd)))))
-    (with-current-buffer buffer
-      (ki-studio-av-mode)
-      (setq ki-studio--av-jd jd-id
-            default-directory root)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize (format "%s  (%s)\n" (alist-get 'ogit/name jd) jd-id) 'face 'bold)
-                (format "%d WorkUnits, %d Qualifikationen, %d Befugnisse, angelegt %s, v%s\n"
-                        (length (cdr pair)) (length qualifications) (length authorities)
-                        (ki-studio--date (alist-get 'ogit/_created-on jd))
-                        (alist-get 'ogit/_v jd)))
-        (ki-studio--section "Stelle")
-        (ki-studio--insert-field "description" (alist-get 'ogit/description jd))
-        (ki-studio--insert-field "content" (alist-get 'ogit/content jd))
-        (pcase-dolist (`(,name . ,value) (ki-studio--free-attributes jd))
-          (ki-studio--insert-field name value))
-        (ki-studio--section "Qualifikationen (ogit/requires)")
-        (dolist (q qualifications)
-          (ki-studio--insert-field (or (alist-get 'ogit/HR/qualificationKind q) "-")
-                                   (alist-get 'ogit/description q)))
-        (when authorities
-          (ki-studio--section "Befugnisse (ogit/defines)")
-          (dolist (a authorities)
-            (ki-studio--insert-field "Authority" (or (alist-get 'ogit/description a)
-                                                     (alist-get 'ogit/name a)))))
-        (dolist (wu (cdr pair))
-          (insert "\n"
-                  (propertize (format "== %s" (alist-get 'ogit/name wu)) 'face 'font-lock-function-name-face)
-                  (format "  [%s]  Anteil %s  v%s\n"
-                          (alist-get 'ogit/_id wu) (alist-get 'ogit/HR/timeShare wu)
-                          (alist-get 'ogit/_v wu)))
-          (ki-studio--insert-field "values" (alist-get 'ogit/values wu))
-          (let ((av (ki-studio--av-attributes wu)))
-            (if (not av)
-                (insert "   (keine av*-Attribute)\n")
-              (pcase-dolist (`(,name . ,value) av)
-                (ki-studio--insert-field name value)))))
-        (goto-char (point-min))))
-    (display-buffer buffer)))
-
-(defun ki-studio-av-refresh ()
-  "Read the job description of this av buffer again."
-  (interactive)
-  (ki-studio-av t ki-studio--av-jd))
+         (related (gethash jd-id ki-studio--jd-related)))
+    (ki-studio--show-org
+     (get-buffer-create (format "*ki stelle: %s*" (alist-get 'ogit/name (car pair))))
+     (ki-studio--jd-org jd-id (car pair) (cdr pair)
+                        (cdr (assoc "ogit/HR/QualificationRequirement" related))
+                        (cdr (assoc "ogit/HR/Authority" related)))
+     (lambda () (ki-studio-av t jd-id))
+     root t)))
 
 
 ;;; PCRE to Emacs regexp
@@ -792,10 +782,6 @@ to /usedKIList, which is NOT an order; then COUNT and MILLIS are nil."
   "The checkout of the last issue or job description shown.
 Links followed outside a checkout, in a note say, read from there.")
 
-(defun ki-studio--section (title)
-  "Insert a section TITLE."
-  (insert "\n" (propertize title 'face 'font-lock-keyword-face) "\n"))
-
 (defun ki-studio--waiting-on (todo)
   "Files of the KIs under ki/ whose `when' waits on TODO."
   (let ((ki-project-directory (ki-studio--ki-dir)))
@@ -879,7 +865,13 @@ keeps wide tables readable, unless WRAP: then they wrap, for prose."
     (setq default-directory root
           ki-studio--view-refresh refresh
           truncate-lines (not wrap))
+    ;; show every character: rules match this text, and a hidden ~ or =
+    ;; would be missing from a regex written off the screen
+    (setq-local org-hide-emphasis-markers nil)
     (visual-line-mode (if wrap 1 -1))
+    ;; wrapped list items continue under their text, not at the margin
+    (when (fboundp 'visual-wrap-prefix-mode)
+      (visual-wrap-prefix-mode (if wrap 1 -1)))
     (let ((inhibit-read-only t))
       (org-table-map-tables #'org-table-align t))
     (set-buffer-modified-p nil)
@@ -1418,9 +1410,6 @@ JD, an (ID . NAME), overrides the focused one.  RET reads one."
   (evil-define-key* 'normal ki-studio-view-mode-map
     (kbd "gr") #'ki-studio-view-refresh
     (kbd "gs") #'ki-studio-view-save-note
-    (kbd "q") #'quit-window)
-  (evil-define-key* 'normal ki-studio-av-mode-map
-    (kbd "gr") #'ki-studio-av-refresh
     (kbd "q") #'quit-window))
 
 (provide 'ki-studio-remote)
