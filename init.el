@@ -116,7 +116,7 @@ and USERPROFILE environment variable on windows."
 (add-hook 'emacs-lisp-mode-hook 'my/enable-tabs)
 
 ;; disable line nubmer hooks
-(global-display-line-numbers-mode 0)
+(global-display-line-numbers-mode 1)
 ;; (defun my/disable-line-numbers ()
 ;;   (display-line-numbers-mode 0))
 ;; (add-hook 'shell-mode-hook 'my/disable-line-numbers)
@@ -177,12 +177,10 @@ and USERPROFILE environment variable on windows."
         org-src-preserve-indentation t
         org-edit-src-content-indentation 0
         org-src-tab-acts-natively t
-        ;; org-hide-leading-stars t
         org-hide-block-startup t
         org-startup-folded t
 		org-default-notes-file (file-name-concat my/notes-directory "inbox.org")
 		org-agenda-files (list (file-name-concat my/notes-directory  "20260630T103000--inbox__plan.org"))
-        ;; org-ellipsis " ─╮"
         org-todo-keywords '((sequence "TODO(t)" "DOING(o)" "WAITING(w)" "BLOCKED(b)"
                                       "|"
                                       "DONE(d)" "CANCELED(c)"))
@@ -192,17 +190,50 @@ and USERPROFILE environment variable on windows."
                                  ("BLOCKED"  . (:foreground "#fb4934" :weight bold))
                                  ("DONE"     . (:foreground "#98971a" :weight bold))
                                  ("CANCELED" . (:foreground "#ebdbb2" :weight bold))))
-  ;; variable-sized headlines
-  ;; (dolist (face '((org-level-1 . 1.4)
-  ;;                 (org-level-2 . 1.25)
-  ;;                 (org-level-3 . 1.15)
-  ;;                 (org-level-4 . 1.1)
-  ;;                 (org-level-5 . 1.05)
-  ;;                 (org-level-6 . 1.0)
-  ;;                 (org-level-7 . 1.0)
-  ;;                 (org-level-8 . 1.0)))
   ;; (set-face-attribute (car face) nil :weight 'bold :height (cdr face)))
-  (set-face-attribute 'org-document-title nil :height 1.6 :weight 'bold))
+  (set-face-attribute 'org-document-title nil :height 1.6 :weight 'bold)
+  ;; render more, show less markup
+  (setq org-pretty-entities t
+        org-fontify-quote-and-verse-blocks t
+        org-fontify-whole-heading-line t
+        org-startup-with-inline-images t
+        org-image-actual-width '(600)))
+
+;; bullets, block borders, tag/date pills, checkbox glyphs
+;; (use-package org-modern
+;;   :ensure t
+;;   :after org
+;;   :custom
+;;   ;; (org-modern-table nil)                ; keep tables plain, they stay monospace
+;;   :config
+;;   (global-org-modern-mode))
+
+;; ***********************************************************************
+;; ***
+;; *** Document view (org + markdown)
+;; ***
+;; Org and markdown buffers read like a rendered page: proportional body
+;; text, centered column, no line numbers. The theme keeps code, tables
+;; and metadata in fixed-pitch so they stay aligned.
+
+;; (set-face-attribute 'variable-pitch nil :family "Segoe UI" :height 1.1)
+;; (set-face-attribute 'fixed-pitch nil :family "Iosevka NF" :height 1.0)
+
+(use-package olivetti
+  :ensure t
+  :custom
+  (olivetti-body-width 100))
+
+(defun my/document-view ()
+  "Make the current org/markdown buffer look like a rendered page."
+  ;; (variable-pitch-mode 1)
+  (visual-line-mode 1)
+  (olivetti-mode 1)
+  (display-line-numbers-mode 0)
+  (setq-local line-spacing 0.25))
+
+(add-hook 'org-mode-hook #'my/document-view)
+(add-hook 'markdown-mode-hook #'my/document-view)
 
 (use-package ox-latex
   :custom
@@ -409,11 +440,16 @@ and USERPROFILE environment variable on windows."
   :ensure t
   :mode ("README\\.md\\'" . gfm-mode)
   :init (setq markdown-command "multimarkdown")
-  :hook ((markdown-mode . visual-line-mode))
+  :hook ((markdown-mode . markdown-display-inline-images))
   :custom
   (markdown-fontify-code-blocks-natively t)
-  (markdown-header-scaling t)
+  ;; header sizes come from the theme
+  (markdown-header-scaling nil)
   (markdown-hide-urls t)
+  (markdown-hide-markup t)
+  (markdown-fontify-whole-heading-line t)
+  (markdown-list-item-bullets '("•" "◦" "▪" "▫"))
+  (markdown-max-image-size '(600 . 600))
   :bind (:map markdown-mode-map
          ("C-c C-e" . markdown-do))
   )
@@ -562,6 +598,24 @@ and USERPROFILE environment variable on windows."
 
 ;; ***********************************************************************
 ;; ***
+;; *** AI agent (agent-shell + Claude Code)
+;; ***
+;; Talks to Claude Code over ACP through the claude-agent-acp adapter
+;; (npm i -g @agentclientprotocol/claude-agent-acp). Auth is the Claude
+;; subscription login of the local `claude' CLI, no API key needed.
+;; If it ever asks for auth, run `claude' once in a terminal and /login.
+(use-package agent-shell
+  :ensure t
+  :commands (agent-shell agent-shell-anthropic-start-claude-code)
+  :config
+  ;; always Claude, skip the agent picker
+  (setq agent-shell-preferred-agent-config 'claude-code
+        agent-shell-anthropic-authentication
+        (agent-shell-anthropic-make-authentication :login t)
+        agent-shell-anthropic-claude-acp-command '("claude-agent-acp")))
+
+;; ***********************************************************************
+;; ***
 ;; *** Key Mapping
 ;; ***
 
@@ -572,6 +626,8 @@ and USERPROFILE environment variable on windows."
    evil-undo-system 'undo-redo
    evil-want-integration t
    evil-want-keybinding nil
+   ;; state is shown in the mode line, no "-- INSERT --" echo
+   evil-echo-state nil
    ;; evil-insert-state-cursor '(box "#d600b6")
    ;; evil-normal-state-cursor '(box "black")
    )
@@ -666,6 +722,7 @@ and USERPROFILE environment variable on windows."
     "t"       'eshell
     "c"       'my/open-init-file
     "e"       'dired-jump
+    "i"       'agent-shell              ; Claude Code
 
     ;; lsp
     "a"     'lsp-execute-code-action
@@ -743,20 +800,98 @@ and USERPROFILE environment variable on windows."
 ;; ***
 ;; *** Theme and UI Customizations
 ;; ***
-(use-package modus-themes
-  :ensure t
-  :init
-  ;; rainbow = distinct accent color per heading level (markdown + org).
-  ;; Must be set before load-theme. Numbers scale heading height.
-  (setq modus-themes-headings
-        '((1 . (rainbow bold 1.4))
-          (2 . (rainbow bold 1.25))
-          (3 . (rainbow bold 1.15))
-          (4 . (rainbow bold 1.1))
-          (5 . (rainbow bold 1.05))
-          (6 . (rainbow bold 1.0))))
-  :config
-  (load-theme 'modus-vivendi-deuteranopia t))
+;; JetBrains Islands Dark port, see themes/islands-dark-theme.el
+(add-to-list 'custom-theme-load-path (expand-file-name "themes" user-emacs-directory))
+(load-theme 'islands-dark t)
+;; gaps between windows in the darker main-window color, like the islands
+;; right-only: a bottom divider would sit under the mode line like padding
+(setq window-divider-default-right-width 6
+      window-divider-default-places 'right-only)
+(window-divider-mode 1)
+
+;; *** Mode line
+;; Built-in only. Layout:
+;;  NORMAL  ● init.el   project   main  ⚠2 ✖1          Elisp …  CRLF  42:17 Top
+;; Colors for these faces come from the theme.
+(defface my/mode-line-evil-normal '((t :inherit mode-line-emphasis))
+  "Evil normal state tag.")
+(defface my/mode-line-evil-insert '((t :inherit success))
+  "Evil insert state tag.")
+(defface my/mode-line-evil-visual '((t :inherit warning))
+  "Evil visual state tag.")
+(defface my/mode-line-evil-replace '((t :inherit error))
+  "Evil replace state tag.")
+(defface my/mode-line-evil-other '((t :inherit shadow))
+  "Evil emacs/motion/operator state tag.")
+(defface my/mode-line-modified '((t :inherit warning))
+  "Modified-buffer dot.")
+(defface my/mode-line-dim '((t :inherit shadow))
+  "Secondary mode line text (encoding, position).")
+
+(setq mode-line-collapse-minor-modes t  ; minor modes behind a clickable "…"
+      mode-line-modes-delimiters '("" . "")
+      mode-line-right-align-edge 'window
+      project-mode-line t
+      evil-mode-line-format nil)        ; the tag is placed below instead
+
+(with-eval-after-load 'evil
+  (setq evil-normal-state-tag   (propertize " NORMAL "   'face 'my/mode-line-evil-normal)
+        evil-insert-state-tag   (propertize " INSERT "   'face 'my/mode-line-evil-insert)
+        evil-visual-state-tag   (propertize " VISUAL "   'face 'my/mode-line-evil-visual)
+        evil-replace-state-tag  (propertize " REPLACE "  'face 'my/mode-line-evil-replace)
+        evil-emacs-state-tag    (propertize " EMACS "    'face 'my/mode-line-evil-other)
+        evil-motion-state-tag   (propertize " MOTION "   'face 'my/mode-line-evil-other)
+        evil-operator-state-tag (propertize " OPERATOR " 'face 'my/mode-line-evil-other)))
+
+(defun my/mode-line-modified ()
+  "Lock for read-only, dot for modified, blank otherwise."
+  (cond (buffer-read-only (propertize " " 'face 'my/mode-line-dim))
+        ((and (buffer-modified-p) (not (derived-mode-p 'special-mode)))
+         (propertize "● " 'face 'my/mode-line-modified))
+        (t "  ")))
+
+(defun my/mode-line-vc ()
+  "Branch name without the backend prefix, e.g. \" main\"."
+  (when (stringp vc-mode)
+    (concat "  " (replace-regexp-in-string "\\` *[A-Za-z]+[-:@!?]" " " vc-mode))))
+
+(defun my/mode-line-encoding ()
+  "Only show coding/EOL when it is not plain utf-8 with unix line ends."
+  (let* ((cs buffer-file-coding-system)
+         (base (coding-system-base cs))
+         (eol (coding-system-eol-type cs))
+         (parts (delq nil
+                      (list (unless (memq base '(utf-8 undecided prefer-utf-8 no-conversion))
+                              (upcase (symbol-name base)))
+                            (pcase eol (1 "CRLF") (2 "CR"))))))
+    (when parts
+      (propertize (concat (string-join parts " ") "  ") 'face 'my/mode-line-dim))))
+
+;; plain "%b" instead of the default 12-column padded name
+(setq-default mode-line-buffer-identification
+              (propertized-buffer-identification "%b"))
+
+(setq-default
+ mode-line-format
+ '("%e"
+   mode-line-front-space
+   (:eval (bound-and-true-p evil-mode-line-tag))
+   " "
+   (:eval (my/mode-line-modified))
+   (:eval (when (file-remote-p default-directory)
+            (propertize "@ " 'face 'my/mode-line-dim)))
+   mode-line-buffer-identification
+   (project-mode-line ("  " project-mode-line-format))
+   (:eval (my/mode-line-vc))
+   (flymake-mode ("  " flymake-mode-line-counters))
+   "%n"
+   mode-line-format-right-align
+   mode-line-misc-info
+   mode-line-modes
+   "  "
+   (:eval (my/mode-line-encoding))
+   (:propertize "%l:%c  %p" face my/mode-line-dim)
+   "  "))
 
 (use-package org-todoist
   :vc (:url "https://github.com/Lillenne/org-todoist"
@@ -776,7 +911,9 @@ and USERPROFILE environment variable on windows."
  ;; Your init file should contain only one such instance.
  ;; If there is more than one, they won't work right.
  '(custom-safe-themes
-   '("488b82a8d9ace0aea8a6825db144e3c65c4f1ef3e090b618bf311d9cdb513322"
+   '("de8f2d8b64627535871495d6fe65b7d0070c4a1eb51550ce258cd240ff9394b0"
+	 "1781e8bccbd8869472c09b744899ff4174d23e4f7517b8a6c721100288311fa5"
+	 "488b82a8d9ace0aea8a6825db144e3c65c4f1ef3e090b618bf311d9cdb513322"
 	 default))
  '(git-gutter:added-sign " ")
  '(git-gutter:deleted-sign " ")
@@ -787,10 +924,10 @@ and USERPROFILE environment variable on windows."
 		 evil-collection evil-multiedit evil-nerd-commenter evil-org
 		 evil-surround general git-gutter gnu-elpa-keyring-update
 		 hackernews jupyter kdl-mode kotlin-mode log4j-mode lsp-mode
-		 lua-mode magit marginalia markdown-mode modus-themes olivetti
-		 orderless org-journal org-modern org-todoist
-		 plantuml-mode powershell restclient rustic shell-maker
-		 spinner treemacs vertico web-mode yaml))
+		 lua-mode magit marginalia markdown-mode modus-themes
+		 nano-theme olivetti orderless org-journal org-modern
+		 org-todoist plantuml-mode powershell restclient rustic
+		 shell-maker spinner treemacs vertico web-mode yaml))
  '(package-vc-selected-packages
    '((org-todoist :url "https://github.com/Lillenne/org-todoist" :branch
 				  "main"))))
